@@ -41,6 +41,10 @@ The other model choices are `MS1BB`, `KS2BB` and `HS3BB`. Default credentials li
 
 There is no four-device inventory limit. Each physical sensor needs its own Bluetooth address and credentials; several entries may use the same model. Give each instance a useful name, such as `Bedroom temperature` or `Kitchen temperature`. Names do not have to be unique, but distinct names make filtering easier.
 
+The dashboard provides a GUI workflow: **Add sensor** opens a 60-second nearby scan and a form for model, address, name, bindkey and direct token. Select a supported result or enter the MAC manually. In a device's advanced dialog, **Name and credentials** allows renaming, credential updates and confirmed local removal. These GUI changes are saved and applied immediately without restarting. Blank credentials preserve saved values; the page receives only configured/not-configured status, never saved secret values. Discovery cannot extract keys. See [dashboard inventory management](DASHBOARD_WINDOWS.md#manage-the-device-inventory).
+
+The following CLI commands remain useful for scripts and terminal workflows.
+
 To add another sensor, repeat `add-device` and `set-key` with its address. Rename an existing sensor by running `add-device` again with the same address and model and a new `--name`; its bindkey, direct token and confirmed MIoT model are preserved.
 
 ```powershell
@@ -54,7 +58,7 @@ Remove an entry from the selected local configuration:
 .\.venv\Scripts\python.exe -m linptech_ble remove-device --address $address
 ```
 
-Removal does not reset, unbind or contact the sensor, and preserves all other entries. An unknown address fails without rewriting the configuration. Keep a private backup if you may need the removed credentials again. Stop and restart the dashboard or monitor after any inventory or credential change; configuration is loaded at startup.
+Removal does not reset, unbind or contact the sensor, and preserves all other entries. An unknown address fails without rewriting the configuration. Keep a private backup if you may need the removed credentials again. Stop and restart the dashboard or monitor after CLI changes or direct configuration-file edits; only changes submitted through the running dashboard are applied live.
 
 ## Monitor, replay and open the dashboard
 
@@ -78,7 +82,7 @@ For live sensor rows, signal quality and advanced controls:
 .\.venv\Scripts\python.exe -m linptech_ble dashboard --open
 ```
 
-Dashboard startup receives advertisements; GATT connection and setting changes require explicit actions by default. An ES5 connection starts radar reporting. Advanced controls call the same public `LinptechClient` used by standalone applications; workers only manage UI state and Windows process isolation. See [dashboard behavior and architecture](DASHBOARD_WINDOWS.md) and [ES5 controls](ES5BB_ADVANCED.md).
+Dashboard startup receives advertisements; GATT connection and setting changes require explicit actions by default. Advanced controls open in a right-side dialog without pushing other sensor rows down. Opening or closing the dialog does not connect or disconnect the device. An ES5 connection starts radar reporting. Advanced controls call the same public `LinptechClient` used by standalone applications; workers only manage UI state and Windows process isolation. See [dashboard behavior and architecture](DASHBOARD_WINDOWS.md) and [ES5 controls](ES5BB_ADVANCED.md).
 
 ## Validate behavior
 

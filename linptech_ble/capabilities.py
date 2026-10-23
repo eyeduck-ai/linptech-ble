@@ -95,6 +95,47 @@ def _property_detail(model: str, prop, specification: dict) -> dict:
                                "diagnostic": "No debug-energy samples from the tested device and flows. Firmware not exposing this channel is likely, but unpublished native SDK subscription details are not fully excluded. Historical firmware version is not a new query result."} if name == "pir_energy" else {})}}
 
 
+def _es5_field_reporting(specification: dict) -> dict:
+    """Explain independent advertising fields without claiming live support.
+
+    MIoT ``read`` is not a declaration of GATT GET support. In particular the
+    released ES5 spec explicitly leaves GATT access empty for light and the
+    interest-region state. Keep absent access distinct from an empty list.
+    """
+    definitions = {
+        "illuminance": ("0x4805", "illuminance", (2, 1005), ["light_value_lux"], [
+            "Illuminance reports independently of occupancy; movement does not guarantee a light report.",
+            "The published GATT access is empty. A direct GET need not return this advertising field.",
+            "light_value_lux (6.75) is a separate device light-judgment value, not a replacement for measured illuminance.",
+        ]),
+        "occupancy": ("0x484E", "occupancy_status", (2, 1078),
+                      ["no_one_determine_time", "detect_mode", "detect_region"], [
+            "The device determines occupancy using its current regions, thresholds and clearing delay.",
+            "No advertisement is not evidence of an empty room.",
+        ]),
+        "occupancy_close_range": ("0x5413", "occupancy_close_range", (5, 1019),
+                                  ["interest_enable", "interest_region"], [
+            "This is binary occupancy in the configured interest region, not distance in meters.",
+            "Check a current authenticated interest_enable read before identifying the feature as disabled.",
+            "The published GATT access is empty; an unread direct property does not imply a missing advertising decoder.",
+        ]),
+        "battery": ("0x5C03", "battery_level", (7, 1003),
+                    ["power_mode", "power_upload_type", "solar_board_power", "power_upload_fast_enable"], [
+            "Historical authenticated battery advertisements were observed; reporting frequency is not established.",
+            "The released specification does not declare GATT access for battery_level.",
+            "Reported power percentage and power source are separate; do not infer 0%, 100% or battery absence from external power.",
+        ]),
+    }
+    return {
+        key: {"broadcast_object_id": object_id, "primary_source": "advertisement",
+              "gatt_property": property_name,
+              "gatt_access": specification.get(identity, {}).get("gatt-access"),
+              "reporting_interval_seconds": None, "missing_means": "not_received",
+              "related_properties": related, "notes": notes}
+        for key, (object_id, property_name, identity, related, notes) in definitions.items()
+    }
+
+
 def _model_detail(model: str, broadcast: list[dict]) -> dict:
     pid, protocol_model = _MODELS[model]
     properties = PROPERTIES if model == "ES5BB" else PROFILES[model]
@@ -146,6 +187,7 @@ def _model_detail(model: str, broadcast: list[dict]) -> dict:
         "wake": wake,
         "advertisement": {**groups, "evidence_scope": "Authenticated captures from tested devices; not live state or a guarantee of reporting frequency.",
                           "independent_pir": "not_observed" if model == "ES5BB" else "not_applicable"},
+        **({"field_reporting": _es5_field_reporting(specification)} if model == "ES5BB" else {}),
         "direct": {"settings_exposed": bool(properties),
                    "authentication": "verified" if model != "MS1BB" else "not_tested_no_settings",
                    "properties": [_property_detail(model, prop, specification.get((prop.siid, prop.piid), {})) for prop in properties],
@@ -253,6 +295,15 @@ def capabilities_schema() -> dict:
         "direct": object_schema({"settings_exposed": boolean, "authentication": {"enum": ["verified", "not_tested_no_settings"]},
                                  "properties": {"type": "array", "items": property_schema}, "write_requirements": strings,
                                  "hardware_scope": text, "report": text})})
+    # Additive and optional for consumers of the original details v1 schema.
+    model_schema["properties"]["field_reporting"] = {
+        "type": "object", "additionalProperties": object_schema({
+            "broadcast_object_id": {"type": "string", "pattern": "^0x[0-9A-F]{4}$"},
+            "primary_source": {"const": "advertisement"}, "gatt_property": text,
+            "gatt_access": {"type": ["array", "null"], "items": {"enum": ["read", "write", "notify"]}},
+            "reporting_interval_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "missing_means": {"const": "not_received"}, "related_properties": strings,
+            "notes": strings})}
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "Linptech capability inventory",
             **object_schema({"version": {"const": 1}, "broadcast": {"type": "object"}, "direct": {"type": "object"},
                              "details": object_schema({"schema_version": {"const": 1}, "models": {"type": "object", "propertyNames": {"enum": list(_MODELS)}, "additionalProperties": model_schema}})})}

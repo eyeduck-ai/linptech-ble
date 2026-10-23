@@ -83,6 +83,30 @@ def test_declared_miot_permissions_never_become_assumed_gatt_read_success():
     assert es5["pir_energy"]["validation"]["sample_count"] == 0
 
 
+def test_es5_field_reporting_keeps_advertising_and_gatt_availability_distinct():
+    fields = detail("ES5BB")["field_reporting"]
+    assert {key: item["broadcast_object_id"] for key, item in fields.items()} == {
+        "illuminance": "0x4805", "occupancy": "0x484E",
+        "occupancy_close_range": "0x5413", "battery": "0x5C03",
+    }
+    assert fields["illuminance"]["gatt_access"] == []
+    assert fields["occupancy_close_range"]["gatt_access"] == []
+    assert fields["battery"]["gatt_access"] is None
+    assert fields["occupancy"]["gatt_access"] == ["notify"]
+    assert fields["illuminance"]["related_properties"] == ["light_value_lux"]
+    assert fields["occupancy_close_range"]["related_properties"] == ["interest_enable", "interest_region"]
+    assert "power_mode" in fields["battery"]["related_properties"]
+    for item in fields.values():
+        assert item["primary_source"] == "advertisement"
+        assert item["missing_means"] == "not_received"
+        assert item["reporting_interval_seconds"] is None
+        assert item["notes"] and "value" not in item and "updated_at" not in item
+    fields["illuminance"]["notes"].clear()
+    assert detail("ES5BB")["field_reporting"]["illuminance"]["notes"]
+    for model in ("MS1BB", "KS2BB", "HS3BB"):
+        assert "field_reporting" not in detail(model)
+
+
 def test_hardware_verification_does_not_open_unknown_or_out_of_spec_writes():
     assert detail("MS1BB")["direct"]["settings_exposed"] is False
     assert detail("MS1BB")["credentials"]["direct"] is None

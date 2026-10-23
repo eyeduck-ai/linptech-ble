@@ -9,8 +9,10 @@ from .standard_auth import DirectError
 
 
 class AutoConnector:
-    def __init__(self, controller: Any, *, retry_seconds: float = 30, ready: Callable[[], bool] = lambda: True) -> None:
+    def __init__(self, controller: Any, *, retry_seconds: float = 30, ready: Callable[[], bool] = lambda: True,
+                 submit: Callable[[dict[str, Any]], str | None] | None = None) -> None:
         self.controller, self.retry_seconds, self.ready = controller, retry_seconds, ready
+        self.submit_command = submit
         self.next_attempt = float("-inf")
         self.stopping = threading.Event()
         self.thread: threading.Thread | None = None
@@ -26,13 +28,18 @@ class AutoConnector:
         # explicit connect (or a service restart). Never fight the user's action.
         if (state.get("last_operation") or {}).get("action") == "disconnect":
             return
-        self.next_attempt = now + self.retry_seconds
         try:
-            self.controller.submit({"action": "connect"})
+            operation = (self.submit_command or self.controller.submit)({"action": "connect"})
         except (DirectError, OSError, RuntimeError):
             # Operation errors are already represented by the controller. In
             # particular no transport exception text or credentials are logged.
-            pass
+            self.next_attempt = now + self.retry_seconds
+        else:
+            # A guarded dashboard callback returns None when inventory is busy
+            # or this controller was replaced. Retry later without blocking a
+            # mutation that is stopping this connector's thread.
+            if self.submit_command is None or operation is not None:
+                self.next_attempt = now + self.retry_seconds
 
     def _run(self) -> None:
         while not self.stopping.is_set():

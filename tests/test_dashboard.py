@@ -290,7 +290,6 @@ def test_replay_worker_uses_original_times_and_does_not_start_bluetooth(tmp_path
     assert result["devices"][0]["last_seen"] == record.timestamp
 
 
-def test_dashboard_cli_rejects_invalid_port_and_empty_config(tmp_path, capsys):
+def test_dashboard_cli_rejects_invalid_port(capsys):
     assert cli.main(["dashboard", "--port", "0"]) == 1
-    assert cli.main(["dashboard", "--config", str(tmp_path / "missing.json")]) == 1
-    assert "設定檔內沒有裝置" in capsys.readouterr().err
+    assert "port" in capsys.readouterr().err

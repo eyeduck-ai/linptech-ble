@@ -49,3 +49,27 @@ def test_never_reconnect_authenticated_busy_or_unconfigured_controller():
     auto.stop()
     auto.tick(0)
     assert not controller.commands
+
+
+def test_guarded_callback_can_skip_without_blocking_or_consuming_retry_interval():
+    controller = Controller()
+    calls = []
+    auto = AutoConnector(controller, submit=lambda command: calls.append(command))
+    auto.tick(0)
+    auto.tick(1)
+    assert calls == [{"action": "connect"}, {"action": "connect"}]
+    assert controller.commands == []
+
+
+def test_guarded_success_retains_retry_backoff_and_legacy_submit_shape():
+    controller = Controller()
+    calls = []
+    def submit(command):
+        calls.append(command)
+        return "operation-id"
+    auto = AutoConnector(controller, submit=submit)
+    auto.tick(0)
+    auto.tick(1)
+    auto.tick(30)
+    assert calls == [{"action": "connect"}, {"action": "connect"}]
+    assert controller.commands == []

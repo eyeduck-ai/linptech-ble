@@ -29,6 +29,7 @@ from .bridge_config import load_bridge_config, public_transport
 from .transport import BluetoothConfig
 from .ha_mqtt import HomeAssistantBridge
 from .auto_connect import AutoConnector
+from .dashboard_inventory import DashboardInventory
 
 STATIC = Path(__file__).with_name("web")
 MODEL_ORDER = {model: i for i, model in enumerate(("ES5BB", "MS1BB", "KS2BB", "HS3BB"))}
@@ -129,10 +130,11 @@ class DashboardState:
         self.direct_devices: dict[str, DirectController] = {}
         self.transport = public_transport(BluetoothConfig())
         self.mqtt: HomeAssistantBridge | None = None
+        self.inventory: DashboardInventory | None = None
         self.devices = {
             device.address: {
                 "address": device.address, "model": device.model, "name": device.name,
-                "key_configured": bool(device.bindkey), "verified": False,
+                "key_configured": bool(device.bindkey), "token_configured": bool(device.auth_token), "verified": False,
                 "last_seen": None, "last_decoded": None, "last_status": None,
                 "last_error": None, "rssi": None, "packets": 0, "decoded": 0,
                 "duplicates": 0, "errors": 0, "measurements": {}, "binary_sensors": {},
@@ -303,6 +305,9 @@ class DashboardState:
                 "direct_devices": {address: controller.snapshot() for address, controller in self.direct_devices.items()},
                 "transport": dict(self.transport),
                 "mqtt": self.mqtt.status() if self.mqtt else {"enabled": False, "status": "disabled"},
+                "management": {"enabled": self.inventory is not None and self.mode == "live"},
+                "discovery": self.inventory.discovery.snapshot() if self.inventory else {
+                    "status": "unavailable", "devices": [], "error": None, "remaining_seconds": 0},
             }
 
 
@@ -363,6 +368,10 @@ class MonitorWorker:
                             mode="monitor", seconds=0, output=events, raw_output=raw,
                             devices=self.devices, configured_only=True, quiet=True,
                             on_record=self.state.ingest,
+                            on_raw_record=lambda record: self.state.inventory.discovery.observe(record)
+                                if self.state.inventory else None,
+                            device_source=lambda: self.state.inventory.source() if self.state.inventory else self.devices,
+                            callback_lock=self.state.inventory.lock if self.state.inventory else None,
                             on_started=lambda: self.state.set_scanner("listening"), **options,
                         )
                         self.state.set_scanner("stopped")
@@ -471,7 +480,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = urlsplit(self.path).path
-        if path == "/api/capabilities":
+        if path in {"/api/devices", "/api/discovery"}:
+            inventory = self.server.state.inventory
+            value = (inventory.snapshot() if path == "/api/devices" else inventory.discovery.snapshot()) if inventory else {
+                "enabled": False, "status": "unavailable", "devices": [], "error": None}
+            self._send(200, json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        elif path == "/api/capabilities":
             from .capabilities import capabilities
             body = json.dumps(capabilities(), ensure_ascii=False, allow_nan=False).encode("utf-8")
             self._send(200, body, "application/json; charset=utf-8")
@@ -509,12 +523,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         route = urlsplit(self.path).path
-        if route not in {"/api/es5/direct", "/api/sensor/direct"}:
+        if route not in {"/api/es5/direct", "/api/sensor/direct", "/api/devices", "/api/discovery"}:
             self._send(404, b"Not found.", "text/plain; charset=utf-8")
             return
         # Custom header + same-origin/Host checks prevent cross-site form posts.
         if self.headers.get("X-Linptech-Control") != "1" or self.headers.get("Content-Type", "").split(";")[0] != "application/json":
             self._send(403, b"Local JSON control requests only.", "text/plain; charset=utf-8")
+            return
+        if route in {"/api/devices", "/api/discovery"}:
+            self._inventory_post(route)
             return
         try:
             size = int(self.headers.get("Content-Length", "0"))
@@ -549,11 +566,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             model = "ES5BB" if route == "/api/es5/direct" else value.pop("model")
-            controller = self.server.state.direct_controller(model, value.pop("address", None))
-            if controller is None:
-                raise DirectError("離線重播模式或未啟用此裝置的直連。")
-            operation_id = controller.submit(value)
+            from contextlib import nullcontext
+            inventory = self.server.state.inventory
+            with inventory.lock if inventory else nullcontext():
+                controller = self.server.state.direct_controller(model, value.pop("address", None))
+                if controller is None:
+                    raise DirectError("離線重播模式或未啟用此裝置的直連。")
+                operation_id = controller.submit(value)
             self._send(202, json.dumps({"id": operation_id}).encode(), "application/json; charset=utf-8")
+        except DirectError as error:
+            self._send(409, json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _inventory_post(self, route: str) -> None:
+        try:
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError()
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 1 <= size <= 4096:
+                raise ValueError()
+            self._post_body_read = True
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError()
+            command = json.loads(raw)
+            if not isinstance(command, dict):
+                raise ValueError()
+            inventory = self.server.state.inventory
+            if inventory is None or self.server.state.mode != "live":
+                raise DirectError("此工作階段不允許修改裝置或搜尋附近裝置。")
+            if route == "/api/discovery":
+                if command.keys() != {"action"} or command.get("action") not in {"start", "stop"}:
+                    raise ValueError()
+                result = inventory.discovery.command(command["action"])
+            else:
+                result = inventory.mutate(command)
+            self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        except (ValueError, TypeError, UnicodeDecodeError):
+            self._send(400, json.dumps({"error": "裝置設定格式不正確；請檢查 MAC、型號、名稱與憑證長度。"}, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
         except DirectError as error:
             self._send(409, json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
@@ -565,34 +615,67 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
         raise ValueError("離線重播不能同時載入 bridge 設定；請移除 --bridge-config，避免歷史事件送到 HA。")
     bridge = load_bridge_config(bridge_path)
     devices = load_config(config)
-    if not devices:
-        raise ValueError("設定檔內沒有裝置；請先使用 add-device 或 import-keys。")
     source = Path(replay_path) if replay_path else None
     if source is not None and not source.is_file():
         raise FileNotFoundError("找不到原始廣播重播檔。")
     state = DashboardState(devices, mode="replay" if source else "live", stale_after=stale_after)
     state.transport = public_transport(bridge.bluetooth)
+    def make_controller(device):
+        controller_type = ProcessDirectController if device.model == "ES5BB" else ProcessSensorController
+        controller = controller_type(device, transport=bridge.bluetooth,
+            on_value=lambda record, address=device.address: state.ingest_direct({**record, "address": address}))
+        controller.defer_start = True
+        return controller
     if source is None:
         for device in devices:
-            controller_type = ProcessDirectController if device.model == "ES5BB" else ProcessSensorController
-            controller = controller_type(device, transport=bridge.bluetooth,
-                on_value=lambda record, address=device.address: state.ingest_direct({**record, "address": address}))
-            controller.defer_start = True
+            controller = make_controller(device)
             state.direct_devices[device.address] = controller
             if device.model == "ES5BB":
                 if state.direct is None:
                     state.direct = controller
             else:
                 state.sensor_direct.setdefault(device.model, controller)
-        if bridge.mqtt.enabled:
-            state.mqtt = HomeAssistantBridge(bridge.mqtt, state.snapshot, state.direct.submit if state.direct else None)
     # Bind before starting BLE so an occupied port cannot leave an orphan scanner.
     server = DashboardServer(state, port)
     worker = MonitorWorker(state, devices, replay_path=source, transport=bridge.bluetooth)
     autos = [AutoConnector(controller, retry_seconds=bridge.es5_retry_seconds,
-                          ready=lambda: state.scanner_status == "listening")
+                          ready=lambda: state.scanner_status == "listening",
+                          submit=lambda command, controller=controller: state.inventory.submit_auto(controller, command)
+                              if state.inventory else None)
              for address, controller in state.direct_devices.items()
              if state.devices[address]["model"] == "ES5BB" and bridge.es5_auto_connect]
+    if source is None:
+        def sync_autos():
+            wanted = [controller for address, controller in state.direct_devices.items()
+                      if state.devices[address]["model"] == "ES5BB" and bridge.es5_auto_connect]
+            for auto in list(autos):
+                if auto.controller not in wanted:
+                    auto.stop()
+                    autos.remove(auto)
+            existing = {auto.controller for auto in autos}
+            for controller in wanted:
+                if controller not in existing:
+                    auto = AutoConnector(controller, retry_seconds=bridge.es5_retry_seconds,
+                        ready=lambda: state.scanner_status == "listening",
+                        submit=lambda command, controller=controller: state.inventory.submit_auto(controller, command))
+                    autos.append(auto)
+                    auto.start()
+        state.inventory = DashboardInventory(state, devices, config, controller_factory=make_controller,
+            new_telemetry=lambda device: DashboardState([device]).devices[device.address],
+            on_controllers_changed=sync_autos)
+        if bridge.mqtt.enabled:
+            # The bridge supplies its exact advertised address; inventory changes
+            # must never route a queued command to a different first ES5 device.
+            def mqtt_submit(command):
+                with state.inventory.lock:
+                    value = dict(command)
+                    address = value.pop("address", None)
+                    controller = state.direct_controller("ES5BB", address)
+                    if controller is None:
+                        raise DirectError("此 ES5BB 已移除或未啟用直連。")
+                    return controller.submit(value)
+            state.mqtt = HomeAssistantBridge(bridge.mqtt, state.snapshot, mqtt_submit,
+                targeted_submit=lambda address, command: mqtt_submit({**command, "address": address}))
     url = f"http://127.0.0.1:{server.server_address[1]}"
     print(f"即時監控台：{url}\n按 Ctrl+C 停止網頁服務與藍牙監聽。", flush=True)
     if source:

@@ -70,6 +70,15 @@ function csvCell(value) {
   if (typeof value !== "number" && /^(?:[\t\r\n]|\s*[=+@-])/.test(text)) text = "'" + text;
   return '"' + text.replaceAll('"', '""') + '"';
 }
+function es5FieldView(device, state, key) {
+  const entry = key === "occupancy_close_range" ? device.binary_sensors?.[key] : device.measurements?.[key];
+  const direct = controllerFor(state, device);
+  const enabled = direct?.properties?.interest_enable;
+  const disabled = key === "occupancy_close_range" && direct?.authenticated && enabled?.status === "read" && enabled.value === false;
+  const notes = { illuminance: "照度獨立上報，不隨每次有人狀態變更更新。", battery: "電量可能低頻上報；供電模式不代表電池百分比。", occupancy_close_range: "需啟用近距關注範圍；此值表示區間有人，不是距離公尺數。" };
+  return { entry, missing: disabled ? "未啟用" : "本輪未上報", detail: disabled ? "本次直連讀值：近距關注範圍已停用。" : notes[key] };
+}
+function canDisconnect(direct) { return Boolean(direct && (direct.authenticated || direct.status === "error")); }
 let latest = null;
 let shown = null;
 let paused = false;
@@ -79,6 +88,7 @@ let lastAnnouncedId = 0;
 let initializedSession = null;
 let selectedRadioDevice = null;
 const advancedPanels = new Map(), temperaturePanels = new Map(), radioRowNodes = new Map();
+let drawerTarget = null, drawerReturnFocus = null, managementSession = null;
 function domId(address, id) { return `device-${address.replace(/[^a-zA-Z0-9]/g, "")}-${id}`; }
 function clonePanel(templateId, address) {
   const content = $(templateId).content.cloneNode(true);
@@ -122,9 +132,10 @@ function ago(timestamp, now) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分前`;
   return `${Math.floor(seconds / 3600)} 小時前`;
 }
-function reading(label, entry, unit, valueOverride) {
+function reading(label, entry, unit, valueOverride, absent) {
   const node = el("div", "reading");
-  node.append(el("span", "reading-label", label), el("span", "reading-value", entry ? (valueOverride ?? `${fmt(entry.value)}${unit ? " " + unit : ""}`) : "尚未上報"), el("span", "reading-age", entry ? timeText(entry.updated_at) : "—"));
+  if (absent?.detail) node.title = absent.detail;
+  node.append(el("span", "reading-label", label), el("span", "reading-value", entry ? (valueOverride ?? `${fmt(entry.value)}${unit ? " " + unit : ""}`) : (absent?.missing || "本輪未上報")), el("span", "reading-age", entry ? `${entry.source === "gatt" ? "直連" : "廣播"} · ${timeText(entry.updated_at)}` : "本次啟動尚無資料"));
   return node;
 }
 function cardFront(device, index, state) {
@@ -159,9 +170,10 @@ function cardFront(device, index, state) {
   main.append(primary, art);
   const readings = el("div", "card-readings");
   if (device.model === "ES5BB") {
-    const near = binary(device, "occupancy_close_range");
+    const luxView = es5FieldView(device, state, "illuminance"), nearView = es5FieldView(device, state, "occupancy_close_range");
+    const near = nearView.entry;
     const nearValue = near ? `${unconfirmed(near, state) ? "最後：" : ""}${near.value ? "有人" : "無人"}` : undefined;
-    readings.append(reading("環境照度", metric(device, "illuminance"), "lux"), reading("近距區間", near, "", nearValue));
+    readings.append(reading("環境照度", luxView.entry, "lux", undefined, luxView), reading("近距區間", near, "", nearValue, nearView));
   } else if (device.model === "KS2BB") {
     readings.append(reading("相對濕度", metric(device, "humidity"), "%"));
     const action = device.last_event;
@@ -173,7 +185,7 @@ function cardFront(device, index, state) {
   } else {
     readings.append(reading("電池電量", metric(device, "battery"), "%"));
   }
-  if (["ES5BB", "KS2BB"].includes(device.model)) readings.append(reading("電池電量", metric(device, "battery"), "%"));
+  if (["ES5BB", "KS2BB"].includes(device.model)) readings.append(reading("電池電量", metric(device, "battery"), "%", undefined, device.model === "ES5BB" ? es5FieldView(device, state, "battery") : undefined));
   // Show additional reported fields too, without manufacturing unreported data.
   const visible = new Set(["temperature", "occupancy", "door", "opening", "motion", "illuminance", "humidity", "occupancy_close_range", "battery"]);
   for (const entry of Object.values(device.measurements)) {
@@ -196,7 +208,7 @@ function cardFront(device, index, state) {
   return front;
 }
 const cardNodes = new Map();
-let cardLayout = "";
+let cardLayout = null;
 function ensureCards(state) {
   const grid = $("sensor-grid");
   const layout = state.devices.map(device => `${device.address}:${device.model}:${device.name}`).join("|");
@@ -204,8 +216,10 @@ function ensureCards(state) {
     // Keep the original controls and their event bindings even when a host
     // restarts with a different device list. Never discard mounted panels.
     for (const [address, panel] of advancedPanels) {
-      if (state.devices.some(device => device.address === address && device.model === panel.model)) $("panel-staging").append(panel.element);
-      else { panel.element.remove(); advancedPanels.delete(address); sensorOperations.delete(address); }
+      if (!state.devices.some(device => device.address === address && device.model === panel.model)) {
+        if (drawerTarget === address) $("device-drawer").close();
+        (panel.host || panel.element).remove(); advancedPanels.delete(address); sensorOperations.delete(address);
+      }
     }
     for (const [address, panel] of temperaturePanels) {
       if (state.devices.some(device => device.address === address && device.model === "KS2BB")) $("panel-staging").append(panel);
@@ -225,23 +239,209 @@ function ensureCards(state) {
         if (!temperaturePanels.has(device.address)) temperaturePanels.set(device.address, clonePanel("temperature-template", device.address));
         card.append(temperaturePanels.get(device.address));
       }
-      const details = el("details", "device-advanced"); details.id = domId(device.address, "advanced");
-      const summary = el("summary");
+      const details = el("div", "device-advanced"); details.id = domId(device.address, "advanced");
+      const summary = el("button", "device-advanced-trigger"); summary.type = "button";
+      summary.setAttribute("aria-haspopup", "dialog"); summary.setAttribute("aria-controls", "device-drawer");
       const label = el("span", "advanced-label", "進階設定");
       label.append(el("span", "visually-hidden", ` · ${deviceLabel(device)}`));
       const status = el("span", "advanced-status", "未直連");
       summary.append(label, status);
-      const host = el("div", "advanced-content");
       if (!advancedPanels.has(device.address)) advancedPanels.set(device.address,
         device.model === "ES5BB" ? createDirectPanel(device) : createSensorPanel(device));
-      host.append(advancedPanels.get(device.address).element);
-      const diagnostic = el("details", "card-decode"); diagnostic.append(el("summary", "", "廣播解析明細"));
-      const objects = el("div", "decode-device");
-      diagnostic.append(objects); host.append(diagnostic); details.append(summary, host); card.append(details);
+      const panel = advancedPanels.get(device.address);
+      if (!panel.host) {
+        const host = el("div", "advanced-content"), management = el("div", "drawer-device-actions");
+        const edit = el("button", "button quiet", "名稱與憑證設定"); edit.type = "button";
+        edit.addEventListener("click", () => openManagement(device.address, summary)); management.append(edit);
+        host.append(management, panel.element);
+        if (device.model === "ES5BB") { const observations = el("section", "management-section es5-observations"); observations.setAttribute("aria-label", "ES5BB 廣播欄位與來源"); host.prepend(observations); }
+        const diagnostic = el("details", "card-decode"); diagnostic.append(el("summary", "", "廣播解析明細"));
+        diagnostic.append(el("div", "decode-device")); host.append(diagnostic); panel.host = host;
+        $("panel-staging").append(host);
+      }
+      summary.addEventListener("click", () => openAdvanced(device.address, summary));
+      details.append(summary); card.append(details);
       grid.append(card); cardNodes.set(device.address, card);
     }
   });
   for (const [address, node] of cardNodes) if (!retained.has(address)) { node.remove(); cardNodes.delete(address); }
+}
+function releaseDrawerContent() {
+  if (drawerTarget && advancedPanels.has(drawerTarget)) $("panel-staging").append(advancedPanels.get(drawerTarget).host);
+  if (managementSession) {
+    clearInterval(managementSession.poll);
+    managementSession.element.querySelectorAll('input[type="password"], input[data-secret]').forEach(input => { input.value = ""; });
+    if (managementSession.scanning) void managementRequest("/api/discovery", { action: "stop" }).catch(() => {});
+    managementSession = null;
+  }
+  drawerTarget = null;
+}
+function showDrawer(title, subtitle, element, trigger) {
+  releaseDrawerContent();
+  if (trigger) drawerReturnFocus = trigger;
+  setText("drawer-title", title); setText("drawer-subtitle", subtitle);
+  $("drawer-content").replaceChildren(element);
+  if (!$("device-drawer").open) $("device-drawer").showModal();
+  $("drawer-content").scrollTop = 0; $("drawer-close").focus();
+}
+function openAdvanced(address, trigger) {
+  const device = latest?.devices.find(item => item.address === address), panel = advancedPanels.get(address);
+  if (!device || !panel) return;
+  showDrawer(device.name, `${device.model} · ${device.address}`, panel.host, trigger);
+  drawerTarget = address;
+}
+async function managementRequest(url, body) {
+  const response = await fetch(url, { method: body ? "POST" : "GET", cache: "no-store", headers: body ? { "Content-Type": "application/json", "X-Linptech-Control": "1" } : {}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
+  let result;
+  try { result = await response.json(); } catch { throw new Error("本機程式未回覆管理結果，請重新整理後確認。"); }
+  if (!response.ok) throw new Error(result.error || "無法完成裝置管理操作。");
+  return result;
+}
+function managementUi(session, id) { return session.element.querySelector(`#${id}`); }
+function managementFeedback(session, text, error = false) {
+  const node = managementUi(session, "management-feedback"); node.textContent = text; node.dataset.state = error ? "error" : "success";
+}
+function updateManagementAvailability() {
+  const unavailable = !connected || paused || latest?.mode === "replay" || latest?.management?.enabled === false;
+  $("add-device").disabled = unavailable;
+  if (!managementSession) return;
+  const session = managementSession, locked = unavailable || session.posting || session.loading;
+  managementUi(session, "management-form").querySelectorAll("input, select").forEach(input => { input.disabled = locked; });
+  managementUi(session, "management-model").disabled = locked || session.editing;
+  managementUi(session, "management-save").disabled = locked;
+  managementUi(session, "discovery-start").disabled = locked;
+  managementUi(session, "management-remove").disabled = locked || !managementUi(session, "management-remove-confirm").checked;
+}
+function fillManagement(session, device) {
+  session.editing = Boolean(device); session.address = device?.address || null;
+  managementUi(session, "discovery-section").hidden = session.editing;
+  managementUi(session, "management-title").textContent = session.editing ? "名稱與憑證" : "加入感測器";
+  managementUi(session, "management-model").value = device?.model || "";
+  managementUi(session, "management-model").disabled = session.editing;
+  managementUi(session, "management-address").value = device?.address || "";
+  managementUi(session, "management-address").readOnly = session.editing;
+  managementUi(session, "management-name").value = device?.name || "";
+  managementUi(session, "management-miot-field").hidden = device?.model !== "HS3BB";
+  managementUi(session, "management-miot-confirm").checked = device?.miot_model === "linp.motion.hs1bb2";
+  managementUi(session, "management-bindkey").value = ""; managementUi(session, "management-token").value = "";
+  managementUi(session, "management-remove-confirm").checked = false;
+  managementUi(session, "management-danger").hidden = !session.editing;
+  managementUi(session, "management-back").hidden = !session.editing;
+  managementUi(session, "management-save").textContent = session.editing ? "儲存變更" : "加入裝置";
+  managementUi(session, "credential-status").textContent = session.editing ? `bindkey：${device.key_configured ? "已保存" : "未設定"} · token：${device.token_configured ? "已保存" : "未設定"} · 已存憑證不會回傳到網頁。` : "先加入裝置即可查看 RSSI；解密數值需要 bindkey，進階直連另需 token。";
+  if (session.editing) { setText("drawer-title", device.name); setText("drawer-subtitle", `${device.model} · ${device.address}`); }
+  updateManagementAvailability();
+}
+function renderDiscovery(session, discovery) {
+  if (managementSession !== session) return;
+  session.scanning = ["scanning", "running"].includes(discovery.status);
+  const status = managementUi(session, "discovery-status");
+  status.textContent = discovery.error || (session.scanning ? "掃描中，請喚醒感測器並稍候…" : discovery.status === "complete" ? "掃描完成。選取裝置後填寫名稱與憑證。" : "選取已發現的裝置，或在下方手動填寫 MAC。");
+  managementUi(session, "discovery-start").textContent = session.scanning ? "停止掃描" : "掃描 60 秒";
+  const devices = discovery.devices || [], signature = JSON.stringify(devices.map(device => [device.address, device.model, device.name, device.rssi, device.configured]));
+  if (signature === session.discoverySignature) return;
+  session.discoverySignature = signature;
+  const nodes = devices.map(candidate => {
+    const row = el("div", "discovery-device"), identity = el("div");
+    identity.append(el("strong", "", candidate.model || candidate.name || "未支援的 MiBeacon 裝置"), el("span", "subtle", `${candidate.address} · ${Number.isFinite(candidate.rssi) ? `${candidate.rssi} dBm` : "RSSI 未知"}`));
+    const button = el("button", "button quiet discovery-choice", candidate.configured ? "已加入 · 管理" : "選取"); button.type = "button";
+    button.disabled = !Object.hasOwn(TYPES, candidate.model) || session.posting;
+    button.addEventListener("click", () => {
+      if (candidate.configured) { void openManagement(candidate.address, drawerReturnFocus); return; }
+      managementUi(session, "management-address").value = candidate.address;
+      managementUi(session, "management-model").value = candidate.model;
+      managementUi(session, "management-miot-field").hidden = candidate.model !== "HS3BB";
+      managementUi(session, "management-miot-confirm").checked = false;
+      if (!managementUi(session, "management-name").value) managementUi(session, "management-name").value = candidate.model;
+      managementUi(session, "management-name").focus();
+      managementFeedback(session, `已選取 ${candidate.model}，請設定名稱與憑證後加入。`);
+    });
+    row.append(identity, button); return row;
+  });
+  if (!nodes.length) nodes.push(el("p", "empty-discovery", session.scanning ? "尚未發現裝置。可短按感測器按鍵喚醒。" : "尚無掃描結果。"));
+  managementUi(session, "discovery-list").replaceChildren(...nodes);
+}
+async function pollDiscovery(session) {
+  if (session.polling || managementSession !== session || session.editing || !connected) return;
+  session.polling = true;
+  try { renderDiscovery(session, await managementRequest("/api/discovery")); }
+  catch { if (managementSession === session) managementUi(session, "discovery-status").textContent = "無法讀取掃描結果，請確認本機程式仍在執行。"; }
+  finally { session.polling = false; }
+}
+async function openManagement(address = null, trigger = null) {
+  const element = $("management-template").content.firstElementChild.cloneNode(true);
+  showDrawer(address ? "裝置管理" : "新增感測器", address || "掃描附近裝置，或手動輸入藍牙 MAC。", element, trigger);
+  const session = { element, editing: Boolean(address), address, posting: false, loading: true, scanning: false, poll: null };
+  managementSession = session;
+  const ui = id => managementUi(session, id);
+  ui("management-model").addEventListener("change", () => { ui("management-miot-field").hidden = ui("management-model").value !== "HS3BB"; ui("management-miot-confirm").checked = false; });
+  ["management-bindkey", "management-token"].forEach(id => { ui(id).dataset.secret = "true"; });
+  ui("management-reveal").addEventListener("change", () => { ["management-bindkey", "management-token"].forEach(id => { ui(id).type = ui("management-reveal").checked ? "text" : "password"; }); });
+  ui("management-remove-confirm").addEventListener("change", updateManagementAvailability);
+  ui("management-back").addEventListener("click", () => openAdvanced(session.address, drawerReturnFocus));
+  ui("discovery-start").addEventListener("click", async () => {
+    if (ui("discovery-start").disabled) return;
+    session.posting = true; updateManagementAvailability();
+    try { renderDiscovery(session, await managementRequest("/api/discovery", { action: session.scanning ? "stop" : "start" })); }
+    catch (error) { if (managementSession === session) ui("discovery-status").textContent = error.name === "TimeoutError" ? "掃描請求逾時，請稍候確認結果。" : error.message; }
+    finally { session.posting = false; updateManagementAvailability(); }
+  });
+  ui("management-form").addEventListener("submit", event => { event.preventDefault(); if (!ui("management-save").disabled && ui("management-form").reportValidity()) void saveManagedDevice(session); });
+  ui("management-remove").addEventListener("click", () => { if (!ui("management-remove").disabled) void saveManagedDevice(session, true); });
+  fillManagement(session, address ? latest?.devices.find(item => item.address === address) : null);
+  try {
+    const result = await managementRequest("/api/devices");
+    if (managementSession !== session) return;
+    if (address) {
+      const device = result.devices.find(item => item.address === address);
+      if (!device) throw new Error("此裝置已移除，請重新整理裝置清單。");
+      fillManagement(session, device);
+    }
+    session.loading = false;
+    if (!address) { await pollDiscovery(session); session.poll = setInterval(() => { void pollDiscovery(session); }, 1500); }
+  } catch (error) { if (managementSession === session) managementFeedback(session, error.message, true); }
+  finally { updateManagementAvailability(); }
+}
+async function saveManagedDevice(session, remove = false) {
+  if (managementSession !== session || session.posting) return;
+  const ui = id => managementUi(session, id);
+  const address = ui("management-address").value.trim().toUpperCase().replaceAll("-", ":").replace(/^([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})$/, "$1:$2:$3:$4:$5:$6");
+  const command = { action: remove ? "remove" : session.editing ? "update" : "add", address };
+  if (!remove) {
+    command.name = ui("management-name").value.trim();
+    if (!session.editing) command.model = ui("management-model").value;
+    if (ui("management-model").value === "HS3BB" && ui("management-miot-confirm").checked) command.miot_model = "linp.motion.hs1bb2";
+    for (const [id, key] of [["management-bindkey", "bindkey"], ["management-token", "auth_token"]]) if (ui(id).value.trim()) command[key] = ui(id).value.trim();
+  }
+  session.posting = true; updateManagementAvailability(); managementFeedback(session, "正在儲存並同步監聽設定…");
+  try {
+    await managementRequest("/api/devices", command);
+    ui("management-bindkey").value = ""; ui("management-token").value = "";
+    const response = await fetch("/api/state", { cache: "no-store" }); if (response.ok) receive(await response.json());
+    if (managementSession !== session) return;
+    if (remove) { $("device-drawer").close(); $("announcer").textContent = "裝置已從本機設定移除。"; return; }
+    const result = await managementRequest("/api/devices");
+    if (managementSession !== session) return;
+    fillManagement(session, result.devices.find(item => item.address === address));
+    clearInterval(session.poll); managementFeedback(session, "已儲存並套用到監聽程式，不需重新啟動。");
+  } catch (error) {
+    if (managementSession === session) managementFeedback(session, error.name === "TimeoutError" ? "請求逾時；請先關閉此視窗並確認裝置清單，再決定是否重試。" : error.message, true);
+  } finally { session.posting = false; updateManagementAvailability(); }
+}
+function renderEs5Observations(device, state) {
+  const section = advancedPanels.get(device.address)?.host?.querySelector(".es5-observations"); if (!section) return;
+  const readings = el("div", "card-readings");
+  for (const [key, label, unit] of [["illuminance", "廣播照度", "lux"], ["occupancy_close_range", "近距區間", ""], ["battery", "電池電量", "%"]]) {
+    const view = es5FieldView(device, state, key);
+    readings.append(reading(label, view.entry, unit, key === "occupancy_close_range" && view.entry ? (view.entry.value ? "有人" : "無人") : undefined, view));
+  }
+  if (!section.querySelector(".card-readings")) {
+    const notes = el("details", "connection-help"); notes.append(el("summary", "", "欄位上報與米家設定"));
+    notes.append(el("p", "", "照度、近距區間與電量各自上報，不保證隨有人事件更新。本輪未收到不代表 0、無人或不支援。照度與近距區間未開放直接讀取；電量直讀能力未確認。"));
+    notes.append(el("p", "", "近距區間需啟用近距關注範圍。供電模式與電池百分比不同；直連的光照判斷值也不等同廣播照度。"));
+    notes.append(el("p", "", "米家與本工具共用裝置內的設定。米家改過校正、感應距離或延遲後，會影響裝置實際回報；離開米家裝置頁並關閉手機藍牙，再重新連線／讀取即可核對，不必只能在此設定。"));
+    section.replaceChildren(el("h3", "", "感測資料與來源"), readings, notes);
+  } else section.querySelector(".card-readings").replaceWith(readings);
 }
 function renderCards(state) {
   ensureCards(state);
@@ -249,6 +449,7 @@ function renderCards(state) {
   const visible = new Set(visibleDevices(state).map(device => device.address));
   $("device-count").textContent = `${visible.size} / ${state.devices.length} 台`;
   $("device-empty").hidden = visible.size !== 0;
+  $("device-empty").textContent = state.devices.length ? "沒有符合條件的裝置" : "尚未設定裝置，按「新增感測器」開始。";
   state.devices.forEach((device, index) => {
     const card = cardNodes.get(device.address);
     card.hidden = !visible.has(device.address);
@@ -259,6 +460,8 @@ function renderCards(state) {
       d?.busy ? "處理中" : d?.authenticated ? (d.streaming?.radar_active ? "雷達即時" : "已直連") : "未直連";
     const badge = card.querySelector(".advanced-status"); badge.textContent = text;
     badge.dataset.state = d?.calibration?.restore_required ? "error" : d?.authenticated && connected ? "active" : "idle";
+    if (drawerTarget === device.address) { setText("drawer-title", device.name); setText("drawer-subtitle", `${device.model} · ${device.address}`); }
+    if (device.model === "ES5BB") renderEs5Observations(device, state);
   });
 }
 function renderFeed(state) {
@@ -494,7 +697,7 @@ function directAvailability() {
   const locked = !connected || paused || latest?.mode === "replay" || controlPosting || Boolean(pendingControl) || d?.busy || !d;
   $("direct-connect").disabled = locked || !d.token_configured || d.authenticated;
   $("direct-refresh").disabled = locked || !d.authenticated;
-  $("direct-disconnect").disabled = locked || !d.authenticated;
+  $("direct-disconnect").disabled = locked || !canDisconnect(d);
   const prop = d?.properties?.[$("direct-property").value];
   const calibrating = ["countdown", "waiting_empty", "scanning", "radar_wait"].includes(d?.calibration?.phase);
   const ready = !locked && d?.authenticated && d.status === "ready" && !calibrating;
@@ -574,8 +777,10 @@ function renderDirect(state) {
   const prop = d.properties[$("direct-property").value];
   settingField(prop, $("direct-property").value);
   setText("direct-current", `裝置目前值：${propertyText(prop)}${prop?.updated_at ? ` · ${timeText(prop.updated_at)}${prop.status !== "read" ? "（上次讀值）" : ""}` : ""}${$("direct-property").value === "pir_threshold" ? " · 調整前請先將紅外線靈敏度設為自訂。" : ""}`);
-  const rows = Object.entries(d.properties).map(([, item]) => {
-    const row = el("div"), description = el("dd", "", propertyText(item));
+  const rows = Object.entries(d.properties).map(([name, item]) => {
+    const advertised = ["illuminance", "occupancy_close_range"].includes(name);
+    const missing = item.value === null || item.value === undefined;
+    const row = el("div"), description = el("dd", "", missing && advertised ? "由廣播上報，未開放直讀" : missing && name === "battery_level" ? "優先查看廣播，直讀能力未確認" : propertyText(item));
     description.append(el("small", "", `${item.siid}.${item.piid} · ${item.status === "read" ? timeText(item.updated_at) : ({ unread: "尚未讀取", unavailable: "裝置回覆空值", cached: "上次連線讀值", error: "讀取失敗" }[item.status] || item.status)}`));
     if (item.error) description.append(el("small", "", item.error));
     row.append(el("dt", "", item.label), description); return row;
@@ -694,7 +899,7 @@ function renderSensorPanel(device, state) {
   const locked = !connected || paused || state.mode === "replay" || op.posting || Boolean(op.pending) || d?.busy || !d;
   ui("sensor-connect").disabled = locked || !d?.supported || !d.token_configured || d.authenticated;
   ui("sensor-refresh").disabled = locked || !d?.authenticated;
-  ui("sensor-disconnect").disabled = locked || !d?.authenticated;
+  ui("sensor-disconnect").disabled = locked || !canDisconnect(d);
   ui("sensor-panel").querySelector(".stream-settings").hidden = model === "MS1BB";
   ui("sensor-settings-form").hidden = model === "MS1BB";
   ui("sensor-settings-status").textContent = op.feedback || d?.error || (model === "MS1BB" ? "僅廣播 · 無開放的直連設定" : d ? `${DIRECT_STATUS[d.status] || d.status}${d.last_operation ? ` · ${{ pending: "操作進行中", done: "操作完成", error: "操作失敗" }[d.last_operation.status] || ""}` : ""}` : "重播模式 · 直連停用");
@@ -765,7 +970,7 @@ function createSensorPanel(device) {
 function renderObjects(state) {
   const statusLabels = { decoded: "已解析", unknown_object: "未知物件", unknown_enum: "未知列舉", outside_spec_range: "超出規格", unauthenticated: "未認證" };
   state.devices.forEach(device => {
-    const section = cardNodes.get(device.address).querySelector(".decode-device"); section.replaceChildren();
+    const section = advancedPanels.get(device.address).host.querySelector(".decode-device"); section.replaceChildren();
     const objects = Object.values(device.objects || {});
     if (!objects.length) section.append(el("p", "", "本輪尚未收到可列出的物件。"));
     for (const item of objects) {
@@ -910,6 +1115,7 @@ function renderConnection() {
   if (shown || latest) renderCards(paused && shown ? shown : latest);
   if (latest) renderSensorSettings(paused && shown ? shown : latest);
   if (shown || latest) renderRadio(paused && shown ? shown : latest);
+  updateManagementAvailability();
 }
 function receive(state) { latest = state; connected = true; ensureCards(state); renderConnection(); if (!paused) render(state); }
 $("pause-button").addEventListener("click", () => {
@@ -934,6 +1140,12 @@ $("clear-filters").addEventListener("click", () => { $("device-search").value = 
 $("receiver-filter").addEventListener("change", () => { if (shown) renderRadio(shown); });
 $("signal-device").addEventListener("change", () => { selectedRadioDevice = $("signal-device").value; if (shown) renderRadio(shown); });
 $("signal-export").addEventListener("click", exportRadio);
+$("add-device").addEventListener("click", () => { if (!$("add-device").disabled) void openManagement(null, $("add-device")); });
+$("drawer-close").addEventListener("click", () => $("device-drawer").close());
+$("device-drawer").addEventListener("close", () => {
+  releaseDrawerContent(); $("drawer-content").replaceChildren();
+  if (drawerReturnFocus?.isConnected) drawerReturnFocus.focus(); else $("add-device").focus();
+});
 window.addEventListener("hashchange", renderView); renderView();
 $("help-button").addEventListener("click", () => $("help-dialog").showModal());
 $("close-help").addEventListener("click", () => $("help-dialog").close());

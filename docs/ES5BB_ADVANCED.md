@@ -48,6 +48,22 @@ Occupancy clears only when the device itself decides the area is empty for its c
 
 Battery percentage and power-source mode are separate fields. External power does not imply a full battery, and unsupported battery reads remain unavailable rather than becoming 0%.
 
+## Missing light, near-range or battery values
+
+All three fields have been decoded from authenticated ES5BB advertisements: illuminance `0x4805`, close-range occupancy `0x5413`, and battery `0x5C03`. They report independently of overall occupancy; entering or leaving the room does not guarantee all fields are transmitted. No fixed reporting interval has been established.
+
+The advanced GATT property table is a separate source. In the [released specification](../linptech_ble/specs/linp.sensor_occupy.es5b.json), `2.1005` illuminance and `5.1019` close-range occupancy have explicitly empty GATT access; `7.1003` battery has no declared GATT access. Their direct reads have not been verified. A GATT row waiting for data does not mean the advertising parser lacks that field. `6.75 light_value_lux` can provide a separate device light-judgment value when a valid read succeeds; it must retain its own identity.
+
+Near-range occupancy is binary presence in the configured interest region, not a measured distance. Check a current `6.72 interest_enable` read and `6.17 interest_region` before diagnosing a disabled or irrelevant region. Never infer a disabled feature from an old session or a missing packet. Battery reports may be infrequent, and their meaning can depend on `power_upload_type`; retain the reported percentage, source and timestamp without deriving it from `power_mode`.
+
+The dashboard starts with no sensor values and waits for new reports; older capture files are not silently loaded as current state. Broadcasting lux does not refresh the battery or near-range timestamp. No report, unread GATT, invalid response and an explicitly reported zero are distinct conditions.
+
+## Settings changed in Xiaomi Home
+
+The app and this SDK address the same device configuration. Regions, sensitivity, thresholds, detection mode, no-one delay and completed calibration can change which occupancy/near-range reports the device produces. The dashboard decodes those resulting reports; it does not require settings to have been written through the dashboard, and these setting changes do not change the MiBeacon object format.
+
+Use one GATT controller at a time. After changing settings in Xiaomi Home, leave its device page and release the phone's Bluetooth connection; reconnect or refresh the dashboard to read the current settings before editing them. Existing chart points and cached settings remain historical until refreshed. The dashboard does not automatically reapply its old settings when reconnecting. Rebinding, factory reset or credential rotation is separate from calibration and can require new credentials; ordinary region/sensitivity changes alone are not a reason to replace bindkeys.
+
 ## Calibration
 
 Fix the sensor in its intended position and prepare an empty detection area. The dashboard requests explicit preparation confirmation and provides a leave-room countdown.

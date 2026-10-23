@@ -12,7 +12,7 @@ Run from the project folder. In an already configured checkout, double-click `st
 
 Open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). Keep the terminal open and press Ctrl+C to stop. No Node.js build is needed. If the port is occupied, use `--port 8767`; starting a second instance may also compete for Bluetooth access.
 
-New users must first create the Python environment and supply their own device credentials: [developer tools](DEVTOOLS.md), [credential setup](BINDKEY_WINDOWS.md). The repository does not include credentials for physical sensors.
+New users must first create the Python environment: [developer tools](DEVTOOLS.md). Add sensors and enter credentials through the dashboard; see [credential setup](BINDKEY_WINDOWS.md) for obtaining your own keys. The repository does not include credentials for physical sensors.
 
 Default startup:
 
@@ -23,7 +23,7 @@ Default startup:
 
 ## Test the sensors
 
-The sensor list uses one row per device with its name, model, latest state, advertisement age and RSSI. Filter by model, or search by name/address to find a specific instance when several sensors share the same model. Filtering changes the display only; reception, recording and device settings are unchanged. Expand a row for its measurement history and advanced controls.
+The sensor list uses one row per device with its name, model, latest state, advertisement age and RSSI. Filter by model, or search by name/address to find a specific instance when several sensors share the same model. Filtering changes the display only; reception, recording and device settings are unchanged. Advanced controls open in a right-side dialog without expanding the device list. Close it with the close button or Escape.
 
 KS2BB's temperature history remains inside its own expanded panel. It plots up to 180 actual decoded readings with their original timestamps; it does not fill silent periods with invented readings.
 
@@ -48,7 +48,7 @@ Open the signal-quality view for a compact reception table and RSSI history. It 
 
 ## Advanced GATT controls
 
-Open the **advanced settings** menu in the relevant sensor row for its connection, settings and advertisement diagnostics. ES5BB's menu also contains radar, PIR, regions and calibration. Opening or closing a menu sends no device command. Prepare the sensor and its separate 12-byte Standard Auth token before connecting; a visible advertisement is not proof that the device is currently connectable.
+Open **advanced settings** in the relevant sensor row for its connection, settings and advertisement diagnostics. ES5BB's dialog also contains radar, PIR, regions and calibration. Opening or closing the dialog sends no device command and does not disconnect an active session. Prepare the sensor and its separate 12-byte Standard Auth token before connecting; a visible advertisement is not proof that the device is currently connectable.
 
 - **ES5BB:** a connection authenticates, reads the catalog and requests the radar stream automatically. See [ES5 advanced controls](ES5BB_ADVANCED.md) for regions, sensitivity, PIR and calibration limits.
 - **KS2BB:** connect to read button mode and display temperature unit. Setting changes require explicit actions and verified readback.
@@ -57,11 +57,17 @@ Open the **advanced settings** menu in the relevant sensor row for its connectio
 
 ## Manage the device inventory
 
-The four supported models are not a four-device limit. Add each physical sensor to `sensors.local.json` using its own address and credentials; multiple sensors of the same model are supported. Use room names to distinguish them, then filter the list by model or search by name/address.
+The four supported models are not a four-device limit. Multiple sensors of the same model are supported; give each a room name and use the model/name/address filters.
 
-Use `add-device` to add or rename an entry, `set-key` for its bindkey, and `set-token` for supported GATT operations. `remove-device --address ...` removes only the local entry and never resets or unbinds the physical sensor. See [inventory commands and examples](DEVTOOLS.md#add-rename-or-remove-sensors).
+1. Select **Add sensor**, then start the 60-second nearby scan. Short-press a sensor's button if needed; do not hold it to reset.
+2. Select a supported result, or enter its model and MAC manually. Set a name and optionally enter its 32-hex-character bindkey and 24-hex-character direct token.
+3. Save. The local configuration, decoder and device list update immediately; no dashboard restart is needed.
+4. To rename or update credentials, open that device's advanced dialog and select **Name and credentials**. Blank credential fields preserve saved values; stored secrets are never sent back to the page.
+5. To remove a device, use the same form, tick the removal confirmation and select **Remove sensor**. This removes its local configuration and credentials without resetting or unbinding the sensor.
 
-Stop and restart the dashboard after editing inventory or credentials; the running process does not reload configuration automatically. Existing recordings remain on disk. The browser does not upload or edit device credentials.
+Scanning discovers advertisements, not credentials. RSSI is available without a bindkey; encrypted values require a correct bindkey, and supported GATT controls require the separate token. Discovery and editing are disabled in replay mode. Disconnect before replacing credentials or removing a connected device, and complete any pending calibration restoration first. Existing recordings remain on disk.
+
+GUI changes are saved to the configuration selected at startup (`sensors.local.json` by default). Command-line tools remain available: [inventory commands](DEVTOOLS.md#add-rename-or-remove-sensors). Changes made by CLI or a text editor still require stopping and restarting the dashboard; external file edits are not watched.
 
 ## Shared library components
 

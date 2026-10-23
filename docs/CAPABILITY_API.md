@@ -30,6 +30,7 @@ Each `details.models[model]` contains:
 | `credentials` | Credential kinds and byte lengths only: 16-byte advertising bindkey, separate 12-byte direct token where settings are exposed, and a separate proxy API key. |
 | `wake` | Observed, reported, or unknown wake evidence. `required=null` means a universal requirement has not been established. |
 | `advertisement` | Object IDs grouped as observed, protocol-only, or compatibility-only. Full definitions remain in top-level `broadcast`. |
+| `field_reporting` | Optional ES5BB field notes: advertising object, separate GATT property/access, related settings, and unknown reporting interval. Missing means not received, never zero/false. |
 | `direct` | Property access, evidence, write prerequisites, and links to validation reports. |
 
 The inventory contains no configured MAC, serial number, current reading, or connection state. Evidence describes tested devices, not a live observation of the caller's device.
@@ -43,6 +44,8 @@ The inventory contains no configured MAC, serial number, current reading, or con
 | `compatibility_only` | Upstream-compatible variants without evidence of reporting by the tested device. |
 
 Unknown objects and enum values remain diagnostics. An update to battery or illuminance does not refresh occupancy. Radar bins and independent PIR energy are not inferred from occupancy advertisements.
+
+ES5BB `field_reporting` distinguishes an advertising value from an unread GATT property. The released specification declares empty GATT access for `2.1005` light and `5.1019` close-range occupancy, and no GATT access declaration for `7.1003` battery. These fields have authenticated advertising evidence; none has an established reporting interval. `6.75 light_value_lux` is a separate light-judgment value, not a substitute for measured illuminance.
 
 ## Direct-property evidence
 

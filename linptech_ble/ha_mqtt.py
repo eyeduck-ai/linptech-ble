@@ -121,8 +121,10 @@ def _age(timestamp: Any, now: datetime) -> float | None:
 
 class HomeAssistantBridge:
     def __init__(self, config: MqttConfig, snapshot: Callable[[], dict[str, Any]],
-                 submit: Callable[[dict[str, Any]], str] | None = None) -> None:
+                 submit: Callable[[dict[str, Any]], str] | None = None, *,
+                 targeted_submit: Callable[[str, dict[str, Any]], str] | None = None) -> None:
         self.config, self._snapshot, self._submit = config, snapshot, submit
+        self._targeted_submit = targeted_submit
         self._client: Any = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -133,6 +135,11 @@ class HomeAssistantBridge:
         self._epoch = 0
         self._discovery: set[str] = set()
         self._cache: dict[str, str] = {}
+        # Keep retirement information outside the publish cache: reconnects
+        # clear that cache, but removed devices still need retained offline.
+        self._device_identity: dict[str, tuple[str, str]] = {}
+        self._device_availability: dict[str, set[str]] = {}
+        self._device_discovery: dict[str, set[str]] = {}
         self._event_start: str | None = None
         self._event_high = 0
         self._event_initialized = False
@@ -270,6 +277,8 @@ class HomeAssistantBridge:
         identity = f"linptech_{mac}"
         base = f"{self.config.topic_prefix}/{mac}/{key}"
         topic = f"{self.config.discovery_prefix}/{component}/{identity}/{key}/config"
+        self._device_availability.setdefault(mac, set()).add(f"{base}/availability")
+        self._device_discovery.setdefault(mac, set()).add(topic)
         if force or topic not in self._discovery:
             payload = {"name": name, "unique_id": f"{identity}_{key}",
                        "device": {"identifiers": [identity], "manufacturer": "Linptech",
@@ -283,6 +292,42 @@ class HomeAssistantBridge:
             if self._publish(topic, _json(payload), qos=1, force=True):
                 self._discovery.add(topic)
         return base, mac
+
+    def _sync_inventory(self, snapshot: dict[str, Any]) -> bool:
+        """Retire removed entities without publishing fabricated state values.
+
+        A name change republishes only that device's discovery metadata. A
+        removal keeps the HA entities but marks every known field unavailable;
+        forget their caches only after those retained writes were accepted.
+        """
+        current = {
+            normalize_address(device["address"]).replace(":", "").lower(): (device["model"], device["name"])
+            for device in snapshot.get("devices", []) if device.get("model") in MODEL_FIELDS
+        }
+        complete = True
+        for mac, identity in tuple(self._device_identity.items()):
+            replacement = current.get(mac)
+            if replacement is None or replacement[0] != identity[0]:
+                accepted = [self._publish(topic, "offline", qos=1, force=True)
+                            for topic in sorted(self._device_availability.get(mac, ()))]
+                if not all(accepted):
+                    complete = False
+                    continue
+                discovery = self._device_discovery.pop(mac, set())
+                self._discovery.difference_update(discovery)
+                prefix = f"{self.config.topic_prefix}/{mac}/"
+                for topic in tuple(self._cache):
+                    if topic.startswith(prefix) or topic in discovery:
+                        self._cache.pop(topic, None)
+                self._device_availability.pop(mac, None)
+                self._device_identity.pop(mac, None)
+            elif replacement != identity:
+                # Unique IDs and states remain stable when only renamed.
+                self._discovery.difference_update(self._device_discovery.get(mac, ()))
+                self._device_identity[mac] = replacement
+        if complete:
+            self._device_identity.update(current)
+        return complete
 
     def _value(self, base: str, value: Any, available: bool, timestamp: str | None,
                *, attributes: dict[str, Any] | None = None, binary: bool = False,
@@ -327,6 +372,12 @@ class HomeAssistantBridge:
             # Gate retained states during resynchronization. Old per-field
             # availability must not briefly resurrect a stale occupancy value.
             self._publish(self.availability_topic, "offline", qos=1, force=True)
+        if not self._sync_inventory(snapshot):
+            # Retry retirement next tick; a bridge-wide unavailable gate also
+            # protects old retained values while a per-field publish fails.
+            self._publish(self.availability_topic, "offline", qos=1)
+            self._drain_commands(None, now)
+            return
         passive = self._transport_available(snapshot)
         direct = snapshot.get("direct") or {}
         ready = direct.get("authenticated") is True and direct.get("status") == "ready"
@@ -512,7 +563,10 @@ class HomeAssistantBridge:
                         value = int(payload)
                     prop.validate(value)
                     command = {"action": "set", "property": name, "value": value}
-                self._submit(command)
+                if self._targeted_submit is not None:
+                    self._targeted_submit(target["address"], command)
+                else:
+                    self._submit(command)
                 with self._lock:
                     self._status["commands_accepted"] += 1
             except Exception:

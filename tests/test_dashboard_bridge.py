@@ -10,6 +10,7 @@ from linptech_ble.bridge_config import BridgeConfig
 from linptech_ble.config import DeviceConfig
 from linptech_ble.ha_mqtt import MqttConfig
 from linptech_ble.transport import BluetoothConfig, ProxyConfig
+from linptech_ble.standard_auth import DirectError
 
 
 SYNTHETIC_API_KEY = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="
@@ -54,6 +55,7 @@ def services(monkeypatch):
             record("direct.stop")
 
         def submit(self, value):
+            instances.setdefault("commands", []).append(value)
             return "synthetic-operation"
 
         def snapshot(self):
@@ -73,8 +75,9 @@ def services(monkeypatch):
             record("worker.stop")
 
     class Mqtt:
-        def __init__(self, config, snapshot, submit):
+        def __init__(self, config, snapshot, submit, *, targeted_submit=None):
             self.config, self.get_snapshot, self.submit = config, snapshot, submit
+            self.targeted_submit = targeted_submit
             instances["mqtt"] = self
 
         def start(self):
@@ -87,8 +90,9 @@ def services(monkeypatch):
             return {"enabled": True, "status": "connected"}
 
     class Auto:
-        def __init__(self, controller, *, retry_seconds, ready):
+        def __init__(self, controller, *, retry_seconds, ready, submit=None):
             self.controller, self.retry_seconds, self.ready = controller, retry_seconds, ready
+            self.submit = submit
             instances["auto"] = self
 
         def start(self):
@@ -129,6 +133,12 @@ def test_bridge_service_routes_transport_and_closes_every_started_service(servic
     assert instances["mqtt"].config is services.settings.mqtt
     assert instances["auto"].controller is instances["direct"]
     assert instances["mqtt"].submit({"action": "connect"}) == "synthetic-operation"
+    address = instances["direct"].device.address
+    assert instances["mqtt"].targeted_submit(address, {"action": "refresh"}) == "synthetic-operation"
+    assert instances["auto"].submit({"action": "connect"}) == "synthetic-operation"
+    assert instances["commands"] == [{"action": "connect"}, {"action": "refresh"}, {"action": "connect"}]
+    with pytest.raises(DirectError):
+        instances["mqtt"].targeted_submit("AA:BB:CC:DD:EE:99", {"action": "connect"})
     assert services.calls == [
         "worker.start", "direct.start", "mqtt.start", "auto.start", "browser.open", "server.serve",
         # GATT must close while its shared proxy advertisement owner is alive.

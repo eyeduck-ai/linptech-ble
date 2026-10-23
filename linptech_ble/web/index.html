@@ -29,7 +29,7 @@
       <div><span>接收廣播</span><strong id="packet-count">—</strong><small>PACKETS</small></div>
       <div><span>狀態與事件</span><strong id="event-count">—</strong><small>UPDATES</small></div>
     </div>
-    <nav class="view-nav" aria-label="監控頁面"><a href="#devices" id="devices-link" aria-current="page">裝置清單</a><a href="#signals" id="signals-link">訊號品質</a></nav>
+    <nav class="view-nav" aria-label="監控頁面"><a href="#devices" id="devices-link" aria-current="page">裝置清單</a><a href="#signals" id="signals-link">訊號品質</a><button id="add-device" type="button" class="button export" disabled>新增感測器 ＋</button></nav>
     <form id="device-toolbar" class="device-toolbar" role="search" aria-label="篩選感測器">
       <label>搜尋裝置<input id="device-search" type="search" placeholder="名稱或 MAC" autocomplete="off"></label>
       <label>型號<select id="model-filter"><option value="all">所有型號</option><option>ES5BB</option><option>MS1BB</option><option>KS2BB</option><option>HS3BB</option></select></label>
@@ -131,6 +131,42 @@
     <div class="advanced-note"><h3>ES5BB 的無人狀態、距離與校正</h3><p>「有人」必須等感測器回報「無人」才會切換；離開範圍後還要等待裝置的無人判定延遲，可在直連工作台查閱及調整。本機的 3 分鐘只用來標示存在狀態過舊，並不是感測器的無人延遲。</p><p>距離以 0.25 公尺區段顯示。連線會開啟即時能量回報；雷達重新校正沒有完成旗標，請以後續底噪及有人／無人測試驗證。空房閾值掃描會先預覽、再套用與回讀。RSSI 是感測器到電腦的訊號強度。</p></div>
     <p class="subtle">暫停畫面只凍結顯示，後台持續接收。要結束監聽，請在啟動程式的 PowerShell 按 Ctrl+C。</p>
   </dialog>
+  <dialog id="device-drawer" class="device-drawer" aria-labelledby="drawer-title" aria-describedby="drawer-subtitle">
+    <header class="drawer-header"><div><p class="drawer-kicker">DEVICE WORKSPACE</p><h2 id="drawer-title">裝置設定</h2><p id="drawer-subtitle"></p></div><button id="drawer-close" type="button" class="button quiet" autofocus aria-label="關閉裝置視窗">關閉 ×</button></header>
+    <div id="drawer-content" class="drawer-content"></div>
+  </dialog>
+  <template id="management-template">
+    <div class="management-layout">
+      <section id="discovery-section" class="management-section" aria-labelledby="discovery-title">
+        <div class="section-heading"><h3 id="discovery-title">附近裝置</h3><button id="discovery-start" type="button" class="button">掃描 60 秒</button></div>
+        <p id="discovery-status" class="management-message" role="status">按掃描尋找附近的 MiBeacon 感測器。</p>
+        <div id="discovery-list" class="discovery-list"><p class="empty-discovery">可先短按裝置按鍵喚醒，請勿長按重設。</p></div>
+      </section>
+      <section class="management-section" aria-labelledby="management-title">
+        <h3 id="management-title">加入感測器</h3>
+        <p id="credential-status" class="credential-status"></p>
+        <form id="management-form" class="management-form" action="/api/devices" method="post" autocomplete="off">
+          <div class="management-grid">
+            <div class="field"><label for="management-model">型號（必填）</label><select id="management-model" name="model" required><option value="">選擇型號</option><option>ES5BB</option><option>MS1BB</option><option>KS2BB</option><option>HS3BB</option></select></div>
+            <div class="field"><label for="management-address">藍牙 MAC（必填）</label><input id="management-address" name="address" required maxlength="17" pattern="(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}" placeholder="AA:BB:CC:DD:EE:FF" spellcheck="false" autocapitalize="off"></div>
+          </div>
+          <div class="field"><label for="management-name">裝置名稱（必填）</label><input id="management-name" name="name" required maxlength="100" placeholder="例如：臥室溫濕度"></div>
+          <div class="field"><label for="management-bindkey">廣播 bindkey · 32 位十六進位</label><input id="management-bindkey" name="bindkey" type="password" pattern="[0-9A-Fa-f]{32}" maxlength="32" autocomplete="new-password" spellcheck="false" aria-describedby="management-key-help"></div>
+          <div class="field"><label for="management-token">直連 token · 24 位十六進位</label><input id="management-token" name="auth_token" type="password" pattern="[0-9A-Fa-f]{24}" maxlength="24" autocomplete="new-password" spellcheck="false" aria-describedby="management-key-help"></div>
+          <div id="management-miot-field" class="field" hidden><label class="credential-visibility"><input id="management-miot-confirm" name="miot_confirm" type="checkbox">已核對 HS3BB 協定型號為 linp.motion.hs1bb2</label><p class="subtle">從裝置或憑證來源確認後勾選，才能開放進階設定寫入；未確認仍可接收廣播。</p></div>
+          <label class="credential-visibility"><input id="management-reveal" type="checkbox">顯示本次輸入的憑證</label>
+          <p id="management-key-help" class="subtle">憑證可稍後填寫；留空會保留已存憑證。掃描只找裝置，不會取得金鑰。</p>
+          <p id="management-feedback" class="management-message" role="status" aria-live="polite"></p>
+          <div class="form-actions"><button id="management-save" type="submit" class="button export">加入裝置</button><button id="management-back" type="button" class="button quiet" hidden>返回進階設定</button></div>
+        </form>
+      </section>
+      <section id="management-danger" class="management-section management-danger" hidden>
+        <h3>移除裝置</h3><p>只移除此監控台的設定與憑證，不會重設感測器。</p>
+        <label><input id="management-remove-confirm" type="checkbox">確認移除此裝置的本機設定</label>
+        <button id="management-remove" type="button" class="button" disabled>移除感測器</button>
+      </section>
+    </div>
+  </template>
   <div id="announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
   <noscript><p class="notice">請啟用 JavaScript，才能顯示即時感測資料。</p></noscript>
 </body>

@@ -106,6 +106,105 @@ def test_discovery_has_mac_stable_ids_four_devices_and_all_availability(fixture)
     assert {json.loads(m["payload"])["unique_id"] for m in matches(client, "/config")} == original
 
 
+def test_removing_device_retires_all_retained_availability_without_false_state(fixture):
+    state, bridge, client, _ = fixture
+    state["devices"][0]["binary_sensors"]["occupancy"] = entry(True)
+    state["devices"][0]["measurements"]["battery"] = entry(92)
+    bridge._tick(now=NOW)
+    prefix = "linptech_ble/aabbccddee01/"
+    known_availability = {m["topic"] for m in client.messages
+                          if m["topic"].startswith(prefix) and m["topic"].endswith("/availability")}
+    assert latest(client, "01/occupancy/state") == "ON"
+    assert latest(client, "01/occupancy/availability") == "online"
+    assert latest(client, "01/pir_sensitivity/availability") == "online"
+    state["devices"].pop(0)
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    retired = [m for m in client.messages if m["topic"].startswith(prefix)]
+    assert {m["topic"] for m in retired} == known_availability
+    assert all(m["payload"] == "offline" and m["retain"] and m["qos"] == 1 for m in retired)
+    assert not any(m["topic"].startswith(prefix) and m["topic"].endswith("/state") for m in retired)
+    assert "aabbccddee01" not in bridge._device_identity
+    assert not any(topic.startswith(prefix) for topic in bridge._cache)
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    assert not any(m["topic"].startswith(prefix) for m in client.messages)
+
+
+def test_rename_republishes_only_its_discovery_with_stable_unique_ids(fixture):
+    state, bridge, client, _ = fixture
+    bridge._tick(now=NOW)
+    previous = {json.loads(m["payload"])["unique_id"] for m in matches(client, "/config")
+                if "linptech_aabbccddee03/" in m["topic"]}
+    state["devices"][2]["name"] = "Bedroom climate"
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    configs = [json.loads(m["payload"]) for m in matches(client, "/config")]
+    assert configs and {item["unique_id"] for item in configs} == previous
+    assert {item["device"]["name"] for item in configs} == {"Bedroom climate"}
+    assert {item["device"]["model"] for item in configs} == {"KS2BB"}
+    assert not any(m["topic"].endswith("/state") for m in client.messages)
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    assert not matches(client, "/config")
+
+
+def test_readding_same_address_does_not_resurrect_removed_retained_readings(fixture):
+    state, bridge, client, _ = fixture
+    state["devices"][1]["binary_sensors"]["opening"] = entry(True)
+    bridge._tick(now=NOW)
+    assert latest(client, "02/opening/state") == "ON"
+    state["devices"].pop(1)
+    bridge._tick(now=NOW)
+    state["devices"].append(sensor("MS1BB", name="Readded door"))
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    assert latest(client, "02/opening/availability") == "offline"
+    assert not matches(client, "02/opening/state")
+    configs = [json.loads(m["payload"]) for m in matches(client, "/config")]
+    assert configs and {item["device"]["name"] for item in configs} == {"Readded door"}
+    state["devices"][-1]["binary_sensors"]["opening"] = entry(False)
+    bridge._tick(now=NOW)
+    assert latest(client, "02/opening/state") == "OFF"
+    assert latest(client, "02/opening/availability") == "online"
+
+
+def test_device_removed_during_disconnect_is_retired_after_cache_resync(fixture):
+    state, bridge, client, _ = fixture
+    state["devices"][1]["binary_sensors"]["opening"] = entry(True)
+    bridge._tick(now=NOW)
+    bridge._on_disconnect(client, None, None, 1)
+    state["devices"].pop(1)
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    assert client.messages == []
+    bridge._on_connect(client, None, None, 0)
+    bridge._tick(now=NOW)
+    assert latest(client, "02/opening/availability") == "offline"
+    assert not matches(client, "02/opening/state")
+    assert latest(client, "bridge/availability") == "online"
+
+
+def test_failed_retirement_is_retried_before_old_identity_is_forgotten(fixture):
+    state, bridge, client, _ = fixture
+    bridge._tick(now=NOW)
+    state["devices"].pop(1)
+    publish = client.publish
+    def reject_one_field(topic, payload, **kwargs):
+        result = publish(topic, payload, **kwargs)
+        return SimpleNamespace(rc=1) if topic.endswith("02/opening/availability") else result
+    client.publish = reject_one_field
+    bridge._tick(now=NOW)
+    assert "aabbccddee02" in bridge._device_identity
+    assert latest(client, "bridge/availability") == "offline"
+    client.publish = publish
+    client.messages.clear()
+    bridge._tick(now=NOW)
+    assert latest(client, "02/opening/availability") == "offline"
+    assert "aabbccddee02" not in bridge._device_identity
+    assert latest(client, "bridge/availability") == "online"
+
+
 def test_resync_orders_global_offline_then_discovery_then_current_states_then_online(fixture):
     state, bridge, client, _ = fixture
     state["devices"][0]["measurements"]["battery"] = entry(0)
@@ -251,6 +350,20 @@ def test_allowed_commands_are_enqueued_then_passed_to_existing_controller(fixtur
         {"action": "set", "property": "detect_region", "value": 4294967295},
         {"action": "refresh"},
     ]
+
+
+def test_targeted_dashboard_callback_keeps_address_from_validated_snapshot(fixture):
+    state, bridge, _, submitted = fixture
+    targeted = []
+    def submit(address, command):
+        # Model a config change after the bridge read its immutable snapshot.
+        state["devices"][0]["address"] = "AA:BB:CC:DD:EE:99"
+        targeted.append((address, command))
+    bridge._targeted_submit = submit
+    message(bridge, "refresh", "PRESS")
+    bridge._tick(now=NOW)
+    assert targeted == [(MACS["ES5BB"], {"action": "refresh"})]
+    assert submitted == []
 
 
 @pytest.mark.parametrize("name,payload,retained", [

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, ContextManager, TextIO
 
 from .config import DeviceConfig, normalize_address
 from .decoder import Decoder
@@ -62,6 +62,9 @@ async def capture(
     on_started: Callable[[], None] | None = None,
     quiet: bool = False,
     transport: BluetoothConfig | None = None,
+    on_raw_record: Callable[[AdvertisementRecord], None] | None = None,
+    device_source: Callable[[], list[DeviceConfig]] | None = None,
+    callback_lock: ContextManager[Any] | None = None,
 ) -> dict[str, Any]:
     """Capture all selected callbacks; only console display is throttled."""
     if mode not in {"scan", "monitor"}:
@@ -69,8 +72,9 @@ async def capture(
     paths = [output] + ([raw_output] if raw_output else [])
     _prepare_paths(paths)
     wanted = normalize_address(address) if address else None
-    configured = {normalize_address(device.address) for device in devices or []}
-    decoder = Decoder(devices or []) if mode == "monitor" else None
+    configured_devices = devices or []
+    configured = {normalize_address(device.address) for device in configured_devices}
+    decoder = Decoder(configured_devices) if mode == "monitor" else None
     stats: dict[str, Any] = {
         "mode": mode,
         "received": 0,
@@ -91,13 +95,21 @@ async def capture(
         destination = _open_output(stack, output)
         raw_destination = _open_output(stack, raw_output) if raw_output else None
 
-        def on_advertisement(device: Any, advertisement: Any) -> None:
-            nonlocal callback_failure
+        def process_advertisement(device: Any, advertisement: Any) -> None:
+            nonlocal callback_failure, configured_devices, configured, decoder
             if callback_failure is not None:
                 return
             stats["received"] += 1
             try:
                 record = AdvertisementRecord.from_bleak(device, advertisement)
+                if on_raw_record is not None:
+                    on_raw_record(record)
+                if device_source is not None:
+                    current = device_source()
+                    if current is not configured_devices:
+                        configured_devices = current
+                        configured = {item.address for item in current}
+                        decoder = Decoder(current) if mode == "monitor" else None
                 record_address = normalize_address(record.address)
                 if wanted and record_address != wanted:
                     return
@@ -153,6 +165,14 @@ async def capture(
                 stats["errors"] += 1
                 callback_failure = error
                 finished.set()
+
+        def on_advertisement(device: Any, advertisement: Any) -> None:
+            # A dashboard mutation replaces decoder credentials and telemetry
+            # together. Keep selection, authenticated decoding, and publication
+            # in that same transaction so an old key cannot verify a new config
+            # or publish into a removed-and-readded device with the same MAC.
+            with callback_lock if callback_lock is not None else nullcontext():
+                process_advertisement(device, advertisement)
 
         if not quiet:
             print(

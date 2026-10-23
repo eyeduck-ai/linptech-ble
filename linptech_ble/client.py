@@ -69,6 +69,8 @@ class PropertyValue:
     Unknown enumerations/ranges remain inspectable as ``invalid_value``.
     Unavailable/error observations may retain the previous value and timestamp;
     they never manufacture a zero. ``cached`` means the connection has ended.
+    ``operation`` preserves an explicit BLE Spec operation (3 = snapshot,
+    4 = notification); missing provenance stays None, never inferred from time.
     """
 
     definition: PropertyDefinition
@@ -77,6 +79,7 @@ class PropertyValue:
     updated_at: str | None = None
     source: str = "cache"
     error: str | None = None
+    operation: int | None = None
 
     @property
     def name(self) -> str:
@@ -333,7 +336,8 @@ class LinptechClient:
             return None
         previous = self._values[definition.name]
         if result.get("status") != 0 or not result.get("available", True):
-            value = replace(previous, status="unavailable", source="gatt", error="Device did not provide an available value.")
+            value = replace(previous, status="unavailable", source="gatt", error="Device did not provide an available value.",
+                            operation=result.get("operation"))
         else:
             observed = result.get("value")
             error = None
@@ -349,7 +353,7 @@ class LinptechClient:
             except (DirectError, ValueError, TypeError):
                 error = "Value/type/enum is outside this model's documented definition; raw value preserved."
             value = PropertyValue(definition, observed, "invalid_value" if error else "read",
-                                  datetime.now(timezone.utc).isoformat(), "gatt", error)
+                                  datetime.now(timezone.utc).isoformat(), "gatt", error, operation=result.get("operation"))
         if (value.valid and result.get("operation") == 4 and not result.get("write_ack", False)
                 and definition.pair != (6, 9)):
             previous_count = self._valid_op4_updates.get(definition.name, {}).get("count", 0)
@@ -585,6 +589,38 @@ class LinptechClient:
                 raise ClientError("Confirm an empty room and select the radar stream first.", code="calibration_preparation_required")
             assert self._session is not None
             return await self._session.command(256)
+        return await self._wire(operation)
+
+    async def commit_radar_thresholds(self, *, empty_room: bool = False) -> bool:
+        """Commit ES5's current custom thresholds with fixed command 512.
+
+        The caller must back up settings before writing and own any rollback.
+        This method makes no property writes: it requires an acknowledged radar
+        stream, explicit empty-room confirmation and fresh valid reads of both
+        32-byte threshold arrays and both custom sensitivity modes (0). A
+        command ACK is not proof of physical calibration quality or completion.
+        """
+        self._check_stream("radar")
+        if empty_room is not True:
+            raise ClientError("Confirm an empty room and select the radar stream first.", code="calibration_preparation_required")
+        requester = asyncio.current_task()
+        async def operation():
+            self._check_stream("radar", requester=requester)
+            if self._stream_mode != "radar":
+                raise ClientError("Confirm an empty room and select the radar stream first.", code="calibration_preparation_required")
+            # These four fields have no bit masks. _read applies the shared
+            # model/type/range/threshold-format validation to each fresh value;
+            # unrelated settings (including reserved report bits) are untouched.
+            for name in ("motion_threshold", "presence_threshold"):
+                await self._read(self._definition(name))
+            for name in ("radar_motion_sens", "radar_presence_sens"):
+                current = await self._read(self._definition(name))
+                if current.value != 0:
+                    raise ClientError("Both radar sensitivities must use explicit custom mode (0) before committing thresholds.", code="radar_not_custom")
+            assert self._session is not None
+            if not await self._session.command(512):
+                raise ClientError("Device did not acknowledge committing the radar thresholds.", code="calibration_unconfirmed")
+            return True
         return await self._wire(operation)
 
     async def updates(self, names: Iterable[PropertyKey] | None = None, *, replay: bool = True) -> AsyncIterator[PropertyValue]:

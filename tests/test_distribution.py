@@ -56,6 +56,7 @@ def test_wheel_and_sdist_exclude_all_private_canaries_and_keep_required_resource
         assert any(name.startswith("linptech_ble/specs/") and name.endswith(".json") for name in files)
     assert "docs/LIBRARY.md" in source_data and "examples/library_direct.py" in source_data
     assert "CONTRIBUTING.md" in source_data and "docs/README.md" in source_data
+    assert "docs/VALIDATION.md" in source_data
     for name in ("CAPABILITY_API.md", "PIR_INVESTIGATION.md", "HS3BB_WAKE.md"):
         assert f"docs/{name}" in source_data
     assert any(name.endswith("/licenses/LICENSE") for name in wheel_names)
@@ -66,7 +67,7 @@ def test_distribution_metadata_has_version_license_bounded_core_and_independent_
     _, wheel, _ = distributions
     with zipfile.ZipFile(wheel) as archive:
         metadata = Parser().parsestr(archive.read(next(n for n in archive.namelist() if n.endswith("/METADATA"))).decode())
-    assert metadata["Name"] == "linptech-ble" and metadata["Version"] == "0.3.0"
+    assert metadata["Name"] == "linptech-ble" and metadata["Version"] == "0.4.0"
     assert metadata["License-Expression"] == "MIT"
     assert set(metadata.get_all("Provides-Extra")) >= {"proxy", "ha", "dashboard", "test"}
     from packaging.requirements import Requirement
@@ -90,7 +91,7 @@ socket.socket = forbidden
 threading.Thread.start = forbidden
 pathlib.Path.read_text = forbidden
 import linptech_ble
-assert linptech_ble.__version__ == '0.3.0'
+assert linptech_ble.__version__ == '0.4.0'
 assert 'LinptechClient' in linptech_ble.__all__
 assert not any(name in sys.modules for name in ('bleak','aioesphomeapi','xiaomi_ble','paho','linptech_ble.dashboard'))
 print('wheel-safe-import')

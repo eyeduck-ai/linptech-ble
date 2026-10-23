@@ -342,7 +342,6 @@ def test_two_capture_handles_share_one_owner_and_release_independently(remote_ap
 def test_threaded_direct_controller_and_capture_share_api_and_keep_crypto_on_controller_loop(tmp_path, remote_api, monkeypatch):
     from linptech_ble.es5_worker import ProcessDirectController
     from test_standard_auth import TOKEN, APP_RANDOM
-    from linptech_ble.standard_auth import encode_value
     monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
     loops = []
     c = ProcessDirectController(DeviceConfig("AA:BB:CC:DD:EE:01", "ES5BB", "Synthetic", TEST_KEY, TOKEN.hex()),
@@ -351,7 +350,7 @@ def test_threaded_direct_controller_and_capture_share_api_and_keep_crypto_on_con
     async def refresh():
         # Limit the fake peer's property catalog; exercise the real auth/read,
         # verified-write, _accept, command queue and threaded controller paths.
-        c._accept(await c.session.read(6, 11))
+        c._accept(await c.client.read("sensitivity_level"))
         c._update(status="ready")
     async def start_reporting():
         pass

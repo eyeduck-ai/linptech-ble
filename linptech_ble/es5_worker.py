@@ -134,6 +134,7 @@ class ProcessDirectController(DirectController):
                     elif kind == "backup":
                         with self.lock:
                             self.cal_backup = deepcopy(value)
+                            self.state["calibration"].update(backup_available=True, restore_required=True)
                     elif kind == "state":
                         state, backup = value
                         with self.lock:

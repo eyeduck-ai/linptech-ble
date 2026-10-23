@@ -59,7 +59,7 @@ For live cards and advanced controls:
 .\.venv\Scripts\python.exe -m linptech_ble dashboard --open
 ```
 
-Dashboard startup receives advertisements; GATT connection and setting changes require explicit actions by default. An ES5 connection starts radar reporting. See [dashboard behavior and architecture](DASHBOARD_WINDOWS.md) and [ES5 controls](ES5BB_ADVANCED.md).
+Dashboard startup receives advertisements; GATT connection and setting changes require explicit actions by default. An ES5 connection starts radar reporting. Advanced controls call the same public `LinptechClient` used by standalone applications; workers only manage UI state and Windows process isolation. See [dashboard behavior and architecture](DASHBOARD_WINDOWS.md) and [ES5 controls](ES5BB_ADVANCED.md).
 
 ## Validate behavior
 

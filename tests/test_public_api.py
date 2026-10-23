@@ -34,7 +34,7 @@ threading.Thread.start = forbidden
 socket.socket = forbidden
 pathlib.Path.read_text = forbidden
 import linptech_ble
-assert linptech_ble.__version__ == "0.3.0"
+assert linptech_ble.__version__ == "0.4.0"
 assert "LinptechClient" in dir(linptech_ble)
 for name in ("bleak", "xiaomi_ble", "cryptography", "aioesphomeapi", "paho", "linptech_ble.dashboard", "linptech_ble.client"):
     assert name not in sys.modules, name

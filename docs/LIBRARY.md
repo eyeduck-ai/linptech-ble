@@ -1,6 +1,6 @@
 # Python library guide
 
-**linptech-ble 0.3.0 · Python 3.11+ · MIT.** Import as `linptech_ble`. Install from this checkout with `python -m pip install -e .`; optional extras are `proxy`, `ha` and `bridge`. See the [README](../README.md) for Windows environment setup.
+**linptech-ble 0.4.0 · Python 3.11+ · MIT.** Import as `linptech_ble`. Install from this checkout with `python -m pip install -e .`; optional extras are `proxy`, `ha` and `bridge`. See the [README](../README.md) for Windows environment setup.
 
 The public API works without the Dashboard, CLI, MQTT or configuration files. Imports, `DeviceConfig`, `Decoder` construction and client construction do not open Bluetooth or load credentials. Supply your own keys; no Xiaomi account or gateway is required at runtime.
 
@@ -72,7 +72,7 @@ async def inspect_sensor(address, auth_token):
 
 Prefer explicit names in `refresh()`; a whole catalog can include firmware-unsupported fields. A key is a property name or `(siid, piid)` tuple. `ClientError.code` identifies client failures; transport/protocol errors and timeouts can also propagate.
 
-`PropertyValue` exposes `definition`, `value`, `status`, `updated_at`, `source`, `error`, plus `name`, `pair`, `valid` and `to_dict()`. Only `status == "read"` is valid. `invalid_value` preserves an undefined enum/range; `cached` means the connection ended. Error states can retain an older value and timestamp, so a non-null value alone is not a fresh observation.
+`PropertyValue` exposes `definition`, `value`, `status`, `updated_at`, `source`, `error`, `operation`, plus `name`, `pair`, `valid` and `to_dict()`. Only `status == "read"` is valid. `operation` preserves the parsed BLE Spec operation (3 for a snapshot, 4 for an update, or `None` when absent), even when timestamps coincide. `invalid_value` preserves an undefined enum/range; `cached` means the connection ended. Error/cached states can retain an older value, timestamp and operation, so a non-null value or operation 4 alone is not proof of current data.
 
 Writes require the model allowlist, correct type/range and a fresh valid read in the current authenticated session. ES5BB `pir_threshold` also requires explicit custom `pir_sensitivity=0`. HS3BB writes require the caller to confirm `DeviceConfig(..., miot_model="linp.motion.hs1bb2")`. MS1BB's released profile has no supported GATT settings. The API does not expose arbitrary commands or firmware updates.
 
@@ -113,6 +113,14 @@ async def observe_radar(device):
 Updates and synchronous/asynchronous `on_update` callbacks use bounded queues, dropping the oldest entries when full. Keep synchronous callbacks nonblocking. Inspect `dropped_updates` / `callback_errors`; this API is not a lossless recorder. Cancelling an iterator removes that observer. Cancelling or timing out a wire operation closes the connection; async context exit releases it.
 
 There is no automatic polling or reconnection. For long ES5BB observations, schedule `await client.keepalive()` about every 120 seconds from the caller. `radar_calibrate(empty_room=True)` requires an active radar stream and sends the fixed calibration command: ACK is not proof of completion or calibration quality. Empty-room confirmation is required.
+
+## Commit custom ES5BB radar thresholds
+
+`await client.commit_radar_thresholds(empty_room=True)` sends only the fixed threshold-commit command `512`. It requires ES5BB, an authenticated connection, the radar stream and explicit empty-room confirmation. A stream context owned by another task cannot be borrowed. Before sending the command, the client freshly reads and validates `motion_threshold`, `presence_threshold`, `radar_motion_sens` and `radar_presence_sens`. Both threshold arrays must contain 32 hexadecimal bytes; both sensitivity modes must be custom (`0`). Cached values cannot satisfy these checks.
+
+This method does not write properties or create a backup. The calling application must save the original four settings before using verified `set()` calls, commit only the intended preview, then independently read back the expected settings. It must restore and verify the originals on failure and report any unresolved restoration. Existing `set()` guards still reject undefined types, ranges, enum values and overwriting unknown reserved bits. A timeout or cancellation closes the connection and can prevent restoration.
+
+The method returns `True` for a command ACK; a missing ACK raises `ClientError` with `code="calibration_unconfirmed"`. An ACK does not establish physical calibration completion or quality. No arbitrary command API is exposed.
 
 ## Static capabilities and live-session diagnostics
 

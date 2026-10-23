@@ -1,5 +1,6 @@
 include README.md LICENSE THIRD_PARTY_NOTICES.md CONTRIBUTING.md pyproject.toml
 include docs/README.md
+include docs/VALIDATION.md
 include docs/LIBRARY.md docs/DEVICE_CAPABILITIES.md docs/DIRECT_PROTOCOL.md docs/DEVTOOLS.md
 include docs/DASHBOARD_WINDOWS.md docs/ESPHOME_HOME_ASSISTANT.md
 include docs/BINDKEY_WINDOWS.md docs/ES5BB_ADVANCED.md docs/ES5BB_DIRECT_VALIDATION_2026-10-22.md

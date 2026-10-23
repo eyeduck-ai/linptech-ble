@@ -33,7 +33,9 @@ Fixed commands on `6.9`: 0 stops streams, 1 starts radar, 4 requests PIR debug e
 
 ## Transport and ownership
 
-The public client shares `StandardSession`, the property catalog and transport with the Dashboard controllers. It does not require the Dashboard or its worker processes. Local Windows Dashboard connections use process isolation; ESPHome uses one shared API owner for advertisements and GATT. Physical proxy operation remains unverified.
+`LinptechClient` owns the authenticated protocol path and uses `StandardSession` internally. Dashboard controllers call this public API for all GATT operations; they do not construct sessions, access raw BLE characteristics or use client internals. The library needs no Dashboard or worker process.
+
+Local Windows Dashboard connections retain process isolation around the public client. ESPHome uses one shared API owner for advertisements and GATT. Physical proxy operation remains unverified. Fixed threshold commit is exposed through `commit_radar_thresholds(empty_room=True)`; callers must still verify the final threshold group after sensitivity changes. Calibration or commit ACKs are not completion measurements.
 
 ## Sources
 

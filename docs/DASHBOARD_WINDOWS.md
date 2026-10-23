@@ -49,7 +49,13 @@ Use the relevant connection button after preparing the sensor and its separate 1
 
 ## Shared library components
 
-Live panels use `runtime.capture()` and the public `Decoder`; replay uses the same decoder. Advanced controls currently use internal controller workers, rather than the public `LinptechClient` facade. Both paths share the property catalog, `StandardSession`, transport and radar helpers. For an application without HTTP or controller workers, use the [async library API](LIBRARY.md).
+Live and replay panels use the public `Decoder`. All advanced GATT operations use the public `LinptechClient`: authentication, typed reads, verified settings, stream selection and fixed calibration/threshold commands. Controller workers adapt those observations and operations to the UI; they do not implement another BLE protocol.
+
+Windows local GATT retains a separate worker process so blocked native cleanup cannot freeze HTTP or scanning. ESPHome keeps the controller in the same process as its shared proxy owner. Worker restarts invalidate current-read permissions and retain any unresolved calibration backup. For an application without HTTP or workers, use the same [async library API](LIBRARY.md).
+
+Cancelling threshold application or restoration can leave a partial device change. The Dashboard retains the backup and marks restoration as required until all original values are independently verified; a closed connection is not evidence that settings were untouched.
+
+The refactored Dashboard route is covered by synthetic encrypted-peer tests. Earlier sensor hardware results still apply to the documented library operations; this UI refactor has not been retested on physical sensors.
 
 ## Offline and proxy modes
 

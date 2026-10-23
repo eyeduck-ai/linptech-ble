@@ -50,6 +50,76 @@ class PropertyUnavailable(DirectError):
     """The device acknowledged a property but returned an empty value."""
 
 
+def _retrieve_task_result(task: asyncio.Task) -> None:
+    """Consume a late cleanup result without logging backend exception text."""
+    with suppress(BaseException):
+        task.result()
+
+
+async def _cancel_and_wait(task: asyncio.Task | None, *, timeout: float = .2) -> None:
+    """Bound cancellation even if a task loses its first cancellation request."""
+    if task is None:
+        return
+    end = asyncio.get_running_loop().time() + timeout
+    while not task.done():
+        task.cancel()
+        remaining = end - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            task.add_done_callback(_retrieve_task_result)
+            raise DirectError("Bluetooth cleanup task did not stop within its deadline.")
+        # wait_for awaits cancellation itself and can exceed its own deadline.
+        # Repeated, bounded wait also handles a lost first cancellation on 3.11.
+        await asyncio.wait((task,), timeout=min(.05, remaining))
+    _retrieve_task_result(task)
+
+
+async def _bounded_cleanup_call(coroutine, *, timeout: float = .5) -> None:
+    task = asyncio.create_task(coroutine)
+    done, _ = await asyncio.wait((task,), timeout=timeout)
+    if not done:
+        try:
+            await _cancel_and_wait(task)
+        finally:
+            raise DirectError("Bluetooth notification cleanup did not finish within its deadline.") from None
+    task.result()
+
+
+async def _cleanup_steps(steps) -> None:
+    failed = False
+    for step in steps:
+        try:
+            await step()
+        except (Exception, asyncio.CancelledError):
+            # One failed backend unsubscribe must not skip remaining channels.
+            # Keep error details private, but never report failed cleanup as OK.
+            failed = True
+    if failed:
+        raise DirectError("Bluetooth cleanup was incomplete; release the connection before reconnecting.") from None
+
+
+async def _finish_cleanup(coroutine) -> None:
+    """Finish bounded resource cleanup, then preserve caller cancellation."""
+    task = asyncio.create_task(coroutine)
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = error
+        except Exception:
+            # Inspect the completed failure below, after preserving any caller
+            # cancellation already observed while this cleanup was running.
+            break
+    try:
+        task.result()
+    except BaseException:
+        if cancelled is not None:
+            raise cancelled from None
+        raise
+    if cancelled is not None:
+        raise cancelled
+
+
 @dataclass(repr=False)
 class SessionCipher:
     device_key: bytes = field(repr=False)
@@ -252,7 +322,11 @@ class FramedChannel:
             if remaining <= 0:
                 raise DirectTimeout("等待藍牙直連回覆逾時。")
             try:
-                return await asyncio.wait_for(queue.get(), min(.2, remaining))
+                # A direct await avoids Python 3.11 wait_for's completed-child
+                # cancellation race, which could keep the session reader alive
+                # while close() awaited it. The receive deadline is unchanged.
+                async with asyncio.timeout(min(.2, remaining)):
+                    return await queue.get()
             except asyncio.TimeoutError:
                 pass
 
@@ -283,11 +357,10 @@ class FramedChannel:
             self.pending.append(message)
 
     async def close(self) -> None:
-        if self.task:
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
-        with suppress(Exception):
-            await self.client.stop_notify(self.uuid)
+        await _finish_cleanup(_cleanup_steps((
+            lambda: _cancel_and_wait(self.task),
+            lambda: _bounded_cleanup_call(self.client.stop_notify(self.uuid)),
+        )))
 
 
 FORMATS = {
@@ -653,17 +726,19 @@ class StandardSession:
             return True
 
     async def close(self) -> None:
-        if self.reader:
-            self.reader.cancel()
-            await asyncio.gather(self.reader, return_exceptions=True)
-            self.reader = None
+        reader, self.reader = self.reader, None
         for future in self.pending_reads.values():
             if not future.done():
                 future.cancel()
         self.pending_reads.clear()
-        for channel in (self.auth, self.write, self.notify):
-            await channel.close()
-        with suppress(Exception):
-            await self.client.stop_notify(UPNP)
-        self.cipher = None
-        self._token = b""
+        try:
+            await _finish_cleanup(_cleanup_steps((
+                lambda: _cancel_and_wait(reader),
+                self.auth.close, self.write.close, self.notify.close,
+                lambda: _bounded_cleanup_call(self.client.stop_notify(UPNP)),
+            )))
+        finally:
+            # Cancellation, a slow reader or one failed native unsubscribe may
+            # never retain authentication material or skip other subscriptions.
+            self.cipher = None
+            self._token = b""

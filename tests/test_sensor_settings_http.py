@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from linptech_ble.config import DeviceConfig
+from linptech_ble.client import LinptechClient, PropertyValue
 from linptech_ble.dashboard import DashboardServer, DashboardState
 from linptech_ble.sensor_direct import SensorDirectController
-from linptech_ble.standard_auth import encode_value
 
 
 KEY = "00112233445566778899aabbccddeeff"
@@ -35,10 +35,9 @@ def state(tmp_path):
 
 
 def read(control, name, value):
-    prop = control.catalog[name]
     control._update(authenticated=True, status="ready")
-    control._accept({"siid": prop.siid, "piid": prop.piid, "status": 0, "available": True,
-                     "type_code": encode_value(value, prop.format)[0], "value": value})
+    definition = LinptechClient(control.device).properties[name]
+    control._accept(PropertyValue(definition, value, "read", "2026-10-23T00:00:01+00:00", "gatt"))
 
 
 @contextmanager

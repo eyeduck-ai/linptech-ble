@@ -2,7 +2,7 @@
 
 Python library for **ES5BB, MS1BB, KS2BB and HS3BB**: decode MiBeacon advertisements and use authenticated GATT on supported models. Works with local BLE or an optional ESPHome Bluetooth Proxy. **No Xiaomi gateway is required.**
 
-**0.3.0 · Python 3.11+ · MIT · experimental API.** The caller supplies credentials; the library does not log into Xiaomi, discover account keys or load local configuration automatically. Importing the package does not scan, connect or start background threads.
+**0.4.0 · Python 3.11+ · MIT · experimental API.** The caller supplies credentials; the library does not log into Xiaomi, discover account keys or load local configuration automatically. Importing the package does not scan, connect or start background threads.
 
 ## Install
 
@@ -72,7 +72,7 @@ From this checkout, after configuring your own devices:
 python -m linptech_ble dashboard --open
 ```
 
-The Dashboard uses the existing local `sensors.local.json` by default and opens `http://127.0.0.1:8765/`. Live mode receives real hardware data; replay/demo data is only an interface test. Keep credentials out of version control. See [Windows Dashboard](docs/DASHBOARD_WINDOWS.md) for setup.
+The Dashboard uses the existing local `sensors.local.json` by default and opens `http://127.0.0.1:8765/`. Its advanced controls use the same public `LinptechClient`. Live mode receives real hardware data; replay/demo data is only an interface test. Keep credentials out of version control. See [Windows Dashboard](docs/DASHBOARD_WINDOWS.md) for setup.
 
 Home Assistant can use the optional **MQTT Discovery bridge**; this is not a native `custom_components` integration. A proxy dedicated to this bridge must have a single BLE subscription owner: do not simultaneously assign it to HA's native ESPHome Bluetooth integration. See [ESPHome and Home Assistant](docs/ESPHOME_HOME_ASSISTANT.md).
 

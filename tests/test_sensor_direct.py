@@ -311,7 +311,11 @@ def test_process_mro_keeps_sensor_catalog_and_selects_correct_execution_boundary
             time.sleep(.05)
         state = control.snapshot()
         assert set(state["properties"]) == {"button_mode", "temperature_unit"}
-        assert control.submit.__func__ is SensorDirectController.submit
+        # The lazy process boundary delegates validation through the model
+        # controller; ES5 calibration must never enter a KS2BB worker queue.
+        with pytest.raises(DirectError, match="此型號不支援"):
+            control.submit({"action": "calibrate", "empty_room": True})
+        assert control.pending_command is None
         assert control._connect.__func__ is SensorDirectController._connect
         if backend == "local":
             assert control.worker is not None and control.worker.is_alive()

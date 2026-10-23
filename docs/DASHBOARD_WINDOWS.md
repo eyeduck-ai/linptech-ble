@@ -23,9 +23,9 @@ Default startup:
 
 ## Test the sensors
 
-Each sensor card shows its latest reported state, field timestamps, advertisement age and RSSI bars. All cards use the same background; color accents indicate state or signal quality. Old or unavailable radio readings have inactive bars and an explicit label. RSSI does not refresh a sensor value or prove a GATT connection.
+The sensor list uses one row per device with its name, model, latest state, advertisement age and RSSI. Filter by model, or search by name/address to find a specific instance when several sensors share the same model. Filtering changes the display only; reception, recording and device settings are unchanged. Expand a row for its measurement history and advanced controls.
 
-KS2BB's temperature history is embedded in its card. It plots up to 180 actual decoded readings with their original timestamps; it does not fill silent periods with invented readings.
+KS2BB's temperature history remains inside its own expanded panel. It plots up to 180 actual decoded readings with their original timestamps; it does not fill silent periods with invented readings.
 
 Place the sensors near the receiver. Close their Xiaomi Home control pages; for GATT tests, turn off the phone's Bluetooth in system settings to release the connection.
 
@@ -42,14 +42,26 @@ Each field keeps its own timestamp. Missing values remain unknown; silence does 
 
 Pausing the display does not stop reception or recording. Export downloads the current display state and recent history; complete raw and decoded recordings remain in `captures/`. These files can contain device identifiers and should stay private.
 
+## Compare signal quality
+
+Open the signal-quality view for a compact reception table and RSSI history. It shows observed signal levels, sample counts and reception gaps for placement checks. Filter by model/name/address and compare the same receiver at each location. The practical bands are project guidance; missed controlled events matter more than one RSSI cutoff. See [receiver placement and measurement limits](SIGNAL_QUALITY.md).
+
 ## Advanced GATT controls
 
-Open the **advanced settings** menu in the relevant sensor card for its connection, settings and advertisement diagnostics. ES5BB's menu also contains radar, PIR, regions and calibration. Opening or closing a menu sends no device command. Prepare the sensor and its separate 12-byte Standard Auth token before connecting; a visible advertisement is not proof that the device is currently connectable.
+Open the **advanced settings** menu in the relevant sensor row for its connection, settings and advertisement diagnostics. ES5BB's menu also contains radar, PIR, regions and calibration. Opening or closing a menu sends no device command. Prepare the sensor and its separate 12-byte Standard Auth token before connecting; a visible advertisement is not proof that the device is currently connectable.
 
 - **ES5BB:** a connection authenticates, reads the catalog and requests the radar stream automatically. See [ES5 advanced controls](ES5BB_ADVANCED.md) for regions, sensitivity, PIR and calibration limits.
 - **KS2BB:** connect to read button mode and display temperature unit. Setting changes require explicit actions and verified readback.
 - **HS3BB:** short-press the physical button and connect promptly. Writes require confirmation of `linp.motion.hs1bb2`. See [wake-up evidence](HS3BB_WAKE.md).
 - **MS1BB:** the released profile has no exposed GATT settings; use its advertisement panels.
+
+## Manage the device inventory
+
+The four supported models are not a four-device limit. Add each physical sensor to `sensors.local.json` using its own address and credentials; multiple sensors of the same model are supported. Use room names to distinguish them, then filter the list by model or search by name/address.
+
+Use `add-device` to add or rename an entry, `set-key` for its bindkey, and `set-token` for supported GATT operations. `remove-device --address ...` removes only the local entry and never resets or unbinds the physical sensor. See [inventory commands and examples](DEVTOOLS.md#add-rename-or-remove-sensors).
+
+Stop and restart the dashboard after editing inventory or credentials; the running process does not reload configuration automatically. Existing recordings remain on disk. The browser does not upload or edit device credentials.
 
 ## Shared library components
 

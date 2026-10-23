@@ -37,6 +37,25 @@ $address = Read-Host 'Sensor Bluetooth MAC address'
 
 The other model choices are `MS1BB`, `KS2BB` and `HS3BB`. Default credentials live in `sensors.local.json`; pass `--config` to select another private file. For authenticated GATT, use `set-token` or import an authorized local export with `--include-tokens`; details are in the credential guide.
 
+## Add, rename or remove sensors
+
+There is no four-device inventory limit. Each physical sensor needs its own Bluetooth address and credentials; several entries may use the same model. Give each instance a useful name, such as `Bedroom temperature` or `Kitchen temperature`. Names do not have to be unique, but distinct names make filtering easier.
+
+To add another sensor, repeat `add-device` and `set-key` with its address. Rename an existing sensor by running `add-device` again with the same address and model and a new `--name`; its bindkey, direct token and confirmed MIoT model are preserved.
+
+```powershell
+$address = Read-Host 'Existing sensor Bluetooth MAC address'
+.\.venv\Scripts\python.exe -m linptech_ble add-device --address $address --model KS2BB --name 'Bedroom temperature'
+```
+
+Remove an entry from the selected local configuration:
+
+```powershell
+.\.venv\Scripts\python.exe -m linptech_ble remove-device --address $address
+```
+
+Removal does not reset, unbind or contact the sensor, and preserves all other entries. An unknown address fails without rewriting the configuration. Keep a private backup if you may need the removed credentials again. Stop and restart the dashboard or monitor after any inventory or credential change; configuration is loaded at startup.
+
 ## Monitor, replay and open the dashboard
 
 ```powershell
@@ -53,7 +72,7 @@ $inputFile = Read-Host 'Path to a private raw JSONL recording'
 .\.venv\Scripts\python.exe -m linptech_ble replay $inputFile
 ```
 
-For live cards and advanced controls:
+For live sensor rows, signal quality and advanced controls:
 
 ```powershell
 .\.venv\Scripts\python.exe -m linptech_ble dashboard --open

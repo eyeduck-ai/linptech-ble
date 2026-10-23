@@ -225,13 +225,17 @@ def test_proxy_drop_health_partial_operation_reconnect_and_cleanup(remote_api):
             await first.drop()
             scanner.check_health()  # The second room is still available.
             assert not scanner.state["one"]["connected"]
-            # Wake a deterministic fast reconnect rather than wait for a timer.
-            for _ in range(100):
-                if len(remote_api.instances) > 2:
-                    break
-                await asyncio.sleep(.025)
+            # Construction precedes connect, scanner-state acknowledgement and
+            # publication of readiness on the broker thread. Wait for the
+            # actual replacement subscription, within the original 2.5s bound.
+            async with asyncio.timeout(2.5):
+                while (len(remote_api.instances) < 3 or not scanner.state["one"]["connected"]
+                       or not scanner.state["one"]["subscription_confirmed"]):
+                    await asyncio.sleep(.025)
             assert len(remote_api.instances) == 3
             assert scanner.state["one"]["connected"]
+            assert remote_api.instances[-1].connected
+            assert remote_api.instances[-1].ad_subscriptions == 1
             await remote_api.instances[-1].drop()
             await second.drop()
             with pytest.raises(TransportError):

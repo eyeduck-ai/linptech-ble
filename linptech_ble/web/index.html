@@ -29,10 +29,18 @@
       <div><span>接收廣播</span><strong id="packet-count">—</strong><small>PACKETS</small></div>
       <div><span>狀態與事件</span><strong id="event-count">—</strong><small>UPDATES</small></div>
     </div>
-    <div class="workspace">
+    <nav class="view-nav" aria-label="監控頁面"><a href="#devices" id="devices-link" aria-current="page">裝置清單</a><a href="#signals" id="signals-link">訊號品質</a></nav>
+    <form id="device-toolbar" class="device-toolbar" role="search" aria-label="篩選感測器">
+      <label>搜尋裝置<input id="device-search" type="search" placeholder="名稱或 MAC" autocomplete="off"></label>
+      <label>型號<select id="model-filter"><option value="all">所有型號</option><option>ES5BB</option><option>MS1BB</option><option>KS2BB</option><option>HS3BB</option></select></label>
+      <label>裝置<select id="instance-filter"><option value="all">所有裝置</option></select></label>
+      <label>接收狀態<select id="radio-filter"><option value="all">全部狀態</option><option value="recent">近期收到</option><option value="weak">訊號偏弱／微弱</option><option value="stale">廣播過舊</option><option value="waiting">尚未收到</option><option value="error">解析異常</option></select></label>
+      <span id="device-count" class="device-count">—</span><button id="clear-filters" type="button" class="button quiet">清除</button>
+    </form>
+    <div class="workspace dashboard-view" id="device-view">
       <section class="sensor-section">
         <div class="section-heading"><h2>裝置總覽</h2><span>01 — SENSOR OVERVIEW</span></div>
-        <div id="sensor-grid" class="sensor-grid"><p class="empty">正在載入已設定的感測器…</p></div>
+        <div id="sensor-grid" class="sensor-grid list-layout"><p class="empty">正在載入已設定的感測器…</p></div><p id="device-empty" class="empty" hidden>沒有符合條件的裝置</p>
       </section>
       <section class="activity-section">
         <div class="section-heading"><h2>即時紀錄</h2><span id="feed-count">02 — ACTIVITY</span></div>
@@ -44,7 +52,18 @@
         </div>
       </section>
     </div>
+    <section id="signal-view" class="dashboard-view" aria-labelledby="signal-title" hidden>
+      <div class="section-heading"><h2 id="signal-title">接收訊號品質</h2><span>RSSI · LAST 5 MINUTES</span></div>
+      <div class="signal-summary"><div><span>篩選裝置</span><strong id="radio-total">—</strong></div><div><span>近 5 分鐘有樣本</span><strong id="radio-observed">—</strong></div><div><span>中位數 ≥ −75 dBm</span><strong id="radio-good">—</strong></div><div><span>中位數 &lt; −90 dBm</span><strong id="radio-poor">—</strong></div></div>
+      <div class="signal-controls"><label for="receiver-filter">接收器</label><select id="receiver-filter"><option value="auto">各裝置最近的接收器</option></select><button id="signal-export" type="button" class="button quiet">匯出 RSSI CSV</button><span id="radio-mode" class="subtle">等待樣本</span></div>
+      <div class="signal-layout">
+        <div class="signal-table-wrap" role="region" aria-label="各裝置訊號統計，可橫向捲動" tabindex="0"><table class="signal-table"><caption>最近 5 分鐘 · 最多 600 筆實際廣播 · 點選裝置查看走勢</caption><thead><tr><th scope="col">裝置</th><th scope="col">型號</th><th scope="col">最新 RSSI</th><th scope="col">中位數</th><th scope="col">範圍</th><th scope="col">樣本</th><th scope="col">最後接收</th><th scope="col">接收器</th></tr></thead><tbody id="signal-rows"></tbody></table></div>
+        <section class="signal-chart-panel" aria-labelledby="radio-chart-title"><div class="section-heading"><h3 id="radio-chart-title">RSSI 走勢</h3><label class="visually-hidden" for="signal-device">走勢裝置</label><select id="signal-device"></select></div><figure><svg id="rssi-chart" viewBox="0 0 800 240" role="img" aria-label="RSSI 走勢，尚無資料"></svg><figcaption id="rssi-caption">收到廣播後繪製</figcaption></figure></section>
+      </div>
+      <details class="signal-help"><summary>如何判斷擺放位置</summary><p>數值越接近 0，接收訊號越強。建議以 −75 dBm 以上為佈置目標；接近或低於 −90 dBm 時，優先調整接收器位置，並實測觸發是否漏接。這些分級是本工具的參考值，並非藍牙合格標準。</p><p>每個位置觀察 2–5 分鐘，以同一接收器比較中位數及範圍，再關門並測試正常使用。沒有新廣播不一定是斷線或丟包；RSSI 無法換算精確距離。畫面只統計已設定的裝置。</p></details>
+    </section>
     <div id="panel-staging" hidden>
+    <template id="direct-template">
     <section id="direct-section" class="direct-section" aria-label="ES5BB 進階控制">
       <div class="direct-panel">
         <div class="direct-toolbar"><div><span id="direct-dot" class="dot pending"></span><strong id="direct-status">尚未連線</strong><span id="direct-auth" class="subtle">等待本機程式</span></div><div class="direct-actions"><button id="direct-connect" class="button export" disabled>連接 ES5BB</button><button id="direct-refresh" class="button" disabled>重新讀取</button><button id="direct-disconnect" class="button quiet" disabled>中斷直連</button></div></div>
@@ -87,6 +106,7 @@
         <details class="direct-details"><summary>查看屬性讀值與連線診斷</summary><dl id="direct-properties" class="property-list"></dl><ol id="direct-diagnostics" class="direct-diagnostics"><li>尚無連線紀錄</li></ol></details>
       </div>
     </section>
+    </template>
     <template id="sensor-settings-template">
       <div class="direct-panel sensor-settings-panel" id="sensor-panel">
         <div class="stream-settings"><button id="sensor-connect" class="button export" disabled>連線讀取</button><button id="sensor-refresh" class="button" disabled>重新讀取</button><button id="sensor-disconnect" class="button quiet" disabled>中斷直連</button></div>
@@ -96,10 +116,11 @@
         <details class="direct-details"><summary>全部屬性</summary><dl id="sensor-properties" class="property-list sensor-properties"></dl></details>
       </div>
     </template>
-    <section id="temperature-panel" class="card-trend" aria-label="KS2BB 溫度歷程">
+    <template id="temperature-template"><details id="temperature-panel" class="card-trend">
+      <summary>溫度走勢 <span id="trend-latest" class="subtle">等待資料</span></summary>
       <div class="trend-card-heading"><h4>溫度走勢</h4><span id="trend-range">等待資料</span></div>
       <figure><svg id="trend-chart" viewBox="0 0 800 140" role="img" aria-label="本次溫度趨勢，尚無資料"></svg><figcaption id="trend-caption">等待溫度廣播</figcaption></figure>
-    </section>
+    </details></template>
     </div>
     <footer><span>LINPTECH / LOCAL MONITOR</span><span id="recording-info">本機紀錄</span><span>TAIPEI · UTC+08:00</span></footer>
   </main>

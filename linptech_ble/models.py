@@ -30,9 +30,14 @@ class AdvertisementRecord:
     manufacturer_data: dict[str, str]
     service_uuids: list[str]
     tx_power: int | None = None
+    receiver: str = "local"
 
     @classmethod
     def from_bleak(cls, device: Any, adv: Any) -> AdvertisementRecord:
+        details = getattr(device, "details", None)
+        source = details.get("source") if isinstance(details, dict) else None
+        # ESPHome's adapter exposes only its configured public proxy name here.
+        receiver = source if isinstance(source, str) and 0 < len(source) <= 64 else "local"
         return cls(
             timestamp=datetime.now(timezone.utc).isoformat(),
             address=normalize_address(device.address),
@@ -42,6 +47,7 @@ class AdvertisementRecord:
             manufacturer_data={str(k): bytes(v).hex() for k, v in adv.manufacturer_data.items()},
             service_uuids=[canonical_uuid(k) for k in adv.service_uuids],
             tx_power=adv.tx_power,
+            receiver=receiver,
         )
 
     @classmethod
@@ -65,8 +71,11 @@ class AdvertisementRecord:
             tx_power = value.get("tx_power")
             if tx_power is not None and (not isinstance(tx_power, int) or isinstance(tx_power, bool)):
                 raise ValueError("tx_power 必須是整數或 null。")
+            receiver = value.get("receiver", "local")
+            if not isinstance(receiver, str) or not 0 < len(receiver) <= 64:
+                raise ValueError("receiver 必須是 1～64 字元的接收器名稱。")
             return cls(timestamp, normalize_address(value["address"]), name, rssi, service_data,
-                       manufacturer_data, [canonical_uuid(k) for k in value.get("service_uuids", [])], tx_power)
+                       manufacturer_data, [canonical_uuid(k) for k in value.get("service_uuids", [])], tx_power, receiver)
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
             # Do not echo malformed input, which might be a mistaken secrets file.
             raise ValueError("無效的廣播紀錄；請確認輸入是 scan/monitor 產生的原始 JSONL。") from exc

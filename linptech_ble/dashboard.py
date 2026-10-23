@@ -8,15 +8,17 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from math import isfinite
 from pathlib import Path
 import threading
 import time
+from statistics import median
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 import webbrowser
 
-from .config import DeviceConfig, load_config
+from .config import DeviceConfig, load_config, normalize_address
 from .decoder import Decoder
 from .models import AdvertisementRecord
 from .runtime import capture
@@ -53,6 +55,8 @@ ERRORS = {
     "model_mismatch": "設定的型號與廣播識別碼不一致。",
     "unsupported_protocol": "尚未支援此廣播協定。",
 }
+RADIO_HISTORY_LIMIT = 600
+RADIO_WINDOW_SECONDS = 300
 
 
 def utc_now() -> str:
@@ -60,12 +64,40 @@ def utc_now() -> str:
 
 
 def age_seconds(timestamp: str | None, now: datetime) -> float | None:
-    if timestamp is None:
+    then = _sample_time(timestamp)
+    if then is None:
         return None
-    then = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
     return max(0, (now - then).total_seconds())
+
+
+def _sample_time(timestamp: Any) -> datetime | None:
+    """Reject malformed sample times rather than replacing them with wall time."""
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except ValueError:
+        return None
+
+
+def _radio_summary(points: list[dict[str, Any]], now: datetime, receiver: str | None) -> dict[str, Any]:
+    recent = [(stamp, point) for point in points if (stamp := _sample_time(point["timestamp"])) is not None
+              and 0 <= (now - stamp).total_seconds() <= RADIO_WINDOW_SECONDS]
+    recent.sort(key=lambda pair: pair[0])
+    values = [point["rssi"] for _, point in recent]
+    last = recent[-1] if recent else None
+    return {
+        "receiver": receiver, "scope": "receiver" if receiver else "all_receivers",
+        "window_seconds": RADIO_WINDOW_SECONDS, "count": len(values),
+        "latest": last[1]["rssi"] if last else None,
+        "median": median(values) if values else None,
+        "min": min(values) if values else None, "max": max(values) if values else None,
+        "last_sample": last[1]["timestamp"] if last else None,
+        "last_sample_age_seconds": (now - last[0]).total_seconds() if last else None,
+        "max_gap_seconds": max(((right[0] - left[0]).total_seconds()
+                                for left, right in zip(recent, recent[1:])), default=None),
+    }
 
 
 def state_text(key: str, value: bool) -> str:
@@ -94,6 +126,7 @@ class DashboardState:
         self.paths: dict[str, str] = {}
         self.direct: DirectController | None = None
         self.sensor_direct: dict[str, ProcessSensorController] = {}
+        self.direct_devices: dict[str, DirectController] = {}
         self.transport = public_transport(BluetoothConfig())
         self.mqtt: HomeAssistantBridge | None = None
         self.devices = {
@@ -104,6 +137,7 @@ class DashboardState:
                 "last_error": None, "rssi": None, "packets": 0, "decoded": 0,
                 "duplicates": 0, "errors": 0, "measurements": {}, "binary_sensors": {},
                 "last_event": None, "history": {}, "objects": {},
+                "radio_history": deque(maxlen=RADIO_HISTORY_LIMIT),
             }
             for device in sorted(devices, key=lambda item: MODEL_ORDER.get(item.model, 99))
         }
@@ -111,6 +145,16 @@ class DashboardState:
     def set_scanner(self, status: str, error: str | None = None) -> None:
         with self.lock:
             self.scanner_status, self.scanner_error = status, error
+
+    def direct_controller(self, model: str, address: str | None = None) -> DirectController | None:
+        """Resolve only configured targets; the omitted-address route is legacy."""
+        if address is None:
+            return self.direct if model == "ES5BB" else self.sensor_direct.get(model)
+        address = normalize_address(address)
+        device = self.devices.get(address)
+        if device is None or device["model"] != model:
+            raise DirectError("請選擇設定檔內型號相符的裝置。")
+        return self.direct_devices.get(address)
 
     def _event(self, device: dict[str, Any], timestamp: str, kind: str, key: str, text: str) -> None:
         self.event_count += 1
@@ -128,7 +172,15 @@ class DashboardState:
             timestamp = packet["timestamp"]
             status = packet.get("status", "parse_error")
             previous_status = device["last_status"]
-            device.update(last_seen=timestamp, rssi=packet.get("rssi"), last_status=status)
+            rssi = packet.get("rssi")
+            valid_rssi = type(rssi) in {int, float} and -127 < rssi < 0 and isfinite(rssi)
+            if valid_rssi and _sample_time(timestamp) is not None:
+                receiver = packet.get("receiver")
+                receiver = receiver if isinstance(receiver, str) and 0 < len(receiver) <= 64 else "local"
+                device["radio_history"].append({"timestamp": timestamp, "rssi": rssi, "receiver": receiver})
+            device.update(last_seen=timestamp, last_status=status)
+            if valid_rssi:
+                device["rssi"] = rssi
             device["packets"] += 1
             self.statuses[status] += 1
             if status in ERRORS:
@@ -196,7 +248,14 @@ class DashboardState:
         if record["name"] not in mapping:
             return
         with self.lock:
-            device = next((item for item in self.devices.values() if item["model"] == "ES5BB"), None)
+            address = record.get("address")
+            if address is None:
+                device = next((item for item in self.devices.values() if item["model"] == "ES5BB"), None)
+            else:
+                try:
+                    device = self.devices.get(normalize_address(address))
+                except ValueError:
+                    return
             if device is None:
                 return
             collection, key, unit = mapping[record["name"]]
@@ -214,11 +273,19 @@ class DashboardState:
         with self.lock:
             devices = []
             for device in self.devices.values():
-                public = deepcopy({key: value for key, value in device.items() if key != "history"})
+                public = deepcopy({key: value for key, value in device.items() if key not in {"history", "radio_history"}})
                 public["history"] = {key: list(points) for key, points in device["history"].items()}
+                points = list(device["radio_history"])
+                receivers = dict.fromkeys(point["receiver"] for point in points)
+                public["radio"] = {
+                    "window_seconds": RADIO_WINDOW_SECONDS, "history_limit": RADIO_HISTORY_LIMIT,
+                    "history": deepcopy(points), "summary": _radio_summary(points, now, None),
+                    "receivers": {receiver: _radio_summary([p for p in points if p["receiver"] == receiver], now, receiver)
+                                  for receiver in receivers},
+                }
                 for entry in public["binary_sensors"].values():
                     entry["age_seconds"] = age_seconds(entry["updated_at"], now)
-                    entry["freshness"] = "recent" if entry["age_seconds"] <= self.stale_after else "stale"
+                    entry["freshness"] = "recent" if entry["age_seconds"] is not None and entry["age_seconds"] <= self.stale_after else "stale"
                 age = age_seconds(device["last_seen"], now)
                 public["age_seconds"] = age
                 public["freshness"] = "waiting" if age is None else ("recent" if age <= self.stale_after else "stale")
@@ -233,6 +300,7 @@ class DashboardState:
                 "recording": dict(self.paths),
                 "direct": self.direct.snapshot() if self.direct else None,
                 "sensor_direct": {model: controller.snapshot() for model, controller in self.sensor_direct.items()},
+                "direct_devices": {address: controller.snapshot() for address, controller in self.direct_devices.items()},
                 "transport": dict(self.transport),
                 "mqtt": self.mqtt.status() if self.mqtt else {"enabled": False, "status": "disabled"},
             }
@@ -457,7 +525,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(raw) != size:
                 raise ValueError()
             value = json.loads(raw)
-            if not isinstance(value, dict) or not value.keys() <= {"action", "property", "value", "empty_room", "mode", "model"}:
+            if not isinstance(value, dict) or not value.keys() <= {"action", "property", "value", "empty_room", "mode", "model", "address"}:
                 raise ValueError()
             if not isinstance(value.get("action"), str) or ("property" in value and not isinstance(value["property"], str)):
                 raise ValueError()
@@ -468,6 +536,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if value.get("model") not in {"MS1BB", "KS2BB", "HS3BB"} or value["action"] not in {"connect", "disconnect", "refresh", "set"}:
                     raise ValueError()
                 expected = expected | {"model"}
+            if "address" in value:
+                value["address"] = normalize_address(value["address"])
+                expected = expected | {"address"}
             if value["action"] == "stream" and value.get("mode") not in {"radar", "pir", "off"}:
                 raise ValueError()
             if value.keys() != expected:
@@ -477,9 +548,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(400, b"Invalid control request.", "text/plain; charset=utf-8")
             return
         try:
-            controller = self.server.state.direct if route == "/api/es5/direct" else self.server.state.sensor_direct.get(value.pop("model"))
+            model = "ES5BB" if route == "/api/es5/direct" else value.pop("model")
+            controller = self.server.state.direct_controller(model, value.pop("address", None))
             if controller is None:
-                raise DirectError("離線重播模式或未啟用 ES5BB 直連。")
+                raise DirectError("離線重播模式或未啟用此裝置的直連。")
             operation_id = controller.submit(value)
             self._send(202, json.dumps({"id": operation_id}).encode(), "application/json; charset=utf-8")
         except DirectError as error:
@@ -501,18 +573,26 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
     state = DashboardState(devices, mode="replay" if source else "live", stale_after=stale_after)
     state.transport = public_transport(bridge.bluetooth)
     if source is None:
-        state.direct = ProcessDirectController(next((device for device in devices if device.model == "ES5BB"), None),
-                                        on_value=state.ingest_direct, transport=bridge.bluetooth)
-        state.sensor_direct = {model: ProcessSensorController(next(device for device in devices if device.model == model),
-                                  transport=bridge.bluetooth)
-                               for model in ("MS1BB", "KS2BB", "HS3BB") if any(device.model == model for device in devices)}
+        for device in devices:
+            controller_type = ProcessDirectController if device.model == "ES5BB" else ProcessSensorController
+            controller = controller_type(device, transport=bridge.bluetooth,
+                on_value=lambda record, address=device.address: state.ingest_direct({**record, "address": address}))
+            controller.defer_start = True
+            state.direct_devices[device.address] = controller
+            if device.model == "ES5BB":
+                if state.direct is None:
+                    state.direct = controller
+            else:
+                state.sensor_direct.setdefault(device.model, controller)
         if bridge.mqtt.enabled:
-            state.mqtt = HomeAssistantBridge(bridge.mqtt, state.snapshot, state.direct.submit)
+            state.mqtt = HomeAssistantBridge(bridge.mqtt, state.snapshot, state.direct.submit if state.direct else None)
     # Bind before starting BLE so an occupied port cannot leave an orphan scanner.
     server = DashboardServer(state, port)
     worker = MonitorWorker(state, devices, replay_path=source, transport=bridge.bluetooth)
-    auto = AutoConnector(state.direct, retry_seconds=bridge.es5_retry_seconds,
-                         ready=lambda: state.scanner_status == "listening") if state.direct and bridge.es5_auto_connect else None
+    autos = [AutoConnector(controller, retry_seconds=bridge.es5_retry_seconds,
+                          ready=lambda: state.scanner_status == "listening")
+             for address, controller in state.direct_devices.items()
+             if state.devices[address]["model"] == "ES5BB" and bridge.es5_auto_connect]
     url = f"http://127.0.0.1:{server.server_address[1]}"
     print(f"即時監控台：{url}\n按 Ctrl+C 停止網頁服務與藍牙監聽。", flush=True)
     if source:
@@ -523,27 +603,23 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
     try:
         worker.start()
         started = True
-        if state.direct:
-            state.direct.start()
-        for controller in state.sensor_direct.values():
-            if controller.catalog and controller.device.auth_token:
+        for address, controller in state.direct_devices.items():
+            if state.devices[address]["model"] == "ES5BB" or (controller.catalog and controller.device.auth_token):
                 controller.start()
         if state.mqtt:
             state.mqtt.start()
-        if auto:
+        for auto in autos:
             auto.start()
         if open_browser:
             webbrowser.open(url)
         server.serve_forever(poll_interval=0.25)
     finally:
         server.closing.set()
-        if auto:
+        for auto in autos:
             auto.stop()
         if state.mqtt:
             state.mqtt.stop()
-        if state.direct:
-            state.direct.stop()
-        for controller in state.sensor_direct.values():
+        for controller in state.direct_devices.values():
             controller.stop()
         if started:
             worker.stop()

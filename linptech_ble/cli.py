@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--model", choices=MODELS, required=True)
     add.add_argument("--name")
 
+    remove = commands.add_parser("remove-device", help="Remove a sensor from local configuration only")
+    remove.add_argument("--config", default="sensors.local.json")
+    remove.add_argument("--address", required=True)
+
     key = commands.add_parser("set-key", help="用不回顯的提示輸入 bindkey")
     key.add_argument("--config", default="sensors.local.json")
     key.add_argument("--address", required=True)
@@ -164,6 +168,17 @@ def _set_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def _remove_device(args: argparse.Namespace) -> int:
+    address = normalize_address(args.address)
+    devices = load_config(args.config)
+    remaining = [device for device in devices if device.address != address]
+    if len(remaining) == len(devices):
+        raise ValueError(f"No configured device at {address}; configuration was not changed.")
+    save_config(args.config, remaining)
+    print(f"Removed {address} from {args.config}. Restart the dashboard to reload configuration.")
+    return 0
+
+
 def _set_token(args: argparse.Namespace) -> int:
     if not sys.stdin.isatty():
         raise ValueError("請在互動式 PowerShell 執行 set-token；不接受管線輸入密鑰。")
@@ -209,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "add-device":
             return _add_device(args)
+        if args.command == "remove-device":
+            return _remove_device(args)
         if args.command == "set-key":
             return _set_key(args)
         if args.command == "set-token":

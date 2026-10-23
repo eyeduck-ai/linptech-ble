@@ -78,6 +78,8 @@ class ProcessDirectController(DirectController):
         self.command_at = 0.0
         self.heartbeat = 0.0
         self.generation = 0
+        self.defer_start = False
+        self._startup_lock = threading.Lock()
 
     def _spawn(self):
         parent, child = self.context.Pipe()
@@ -98,6 +100,13 @@ class ProcessDirectController(DirectController):
         self.generation += 1
 
     def start(self):
+        if self.defer_start:
+            return
+        self._start_now()
+
+    def _start_now(self):
+        if self.loop is not None or self.stop_requested.is_set():
+            return
         if self.transport.backend == "esphome":
             # Native API sends GATT replies to the advertisement subscriber.
             # Both consumers must share the same process-local API broker.
@@ -121,6 +130,16 @@ class ProcessDirectController(DirectController):
         self.commands, self.loop = QueueProxy(), LoopProxy()
         self.thread = threading.Thread(target=self._monitor, daemon=True, name="es5-worker-monitor")
         self.thread.start()
+
+    def submit(self, value):
+        # A large dashboard should not allocate one idle native subprocess per
+        # configured sensor. Only an explicit connect (or opt-in auto-connect)
+        # starts its controller; the default worker API remains eager.
+        if (self.defer_start and value.get("action") == "connect" and self.device and self.device.auth_token
+                and getattr(self, "catalog", True)):
+            with self._startup_lock:
+                self._start_now()
+        return super().submit(value)
 
     def _monitor(self):
         while not self.stop_requested.is_set():

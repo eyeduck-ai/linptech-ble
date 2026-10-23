@@ -28,6 +28,48 @@ function temperatureSeries(device) {
     .filter(point => Number.isFinite(point.value) && Number.isFinite(Date.parse(point.timestamp)))
     .slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 }
+function qualityForRssi(value) {
+  return !Number.isFinite(value) || value >= 0 || value <= -127 ? "unknown" :
+    value >= -60 ? "strong" : value >= -75 ? "fair" : value >= -90 ? "weak" : "poor";
+}
+function filterDevices(devices, criteria, state) {
+  const query = (criteria.query || "").trim().toLowerCase();
+  return devices.filter(device => {
+    if (criteria.model && criteria.model !== "all" && device.model !== criteria.model) return false;
+    if (criteria.address && criteria.address !== "all" && device.address !== criteria.address) return false;
+    if (query && !`${device.name} ${device.model} ${device.address}`.toLowerCase().includes(query)) return false;
+    const age = device.last_seen ? (Date.parse(state.server_time) - Date.parse(device.last_seen)) / 1000 : Infinity;
+    const recent = Boolean(device.last_seen && age >= 0 && age <= state.stale_after);
+    switch (criteria.radio) {
+      case "recent": return recent;
+      case "weak": return recent && ["weak", "poor"].includes(qualityForRssi(device.rssi));
+      case "stale": return Boolean(device.last_seen && age > state.stale_after);
+      case "waiting": return !device.last_seen;
+      case "error": return Boolean(device.last_error);
+      default: return true;
+    }
+  });
+}
+function controllerFor(state, device) {
+  if (!state || !device) return null;
+  if (state.direct_devices && Object.keys(state.direct_devices).length) return state.direct_devices[device.address] || null;
+  if (state.devices.find(item => item.model === device.model)?.address !== device.address) return null;
+  return device.model === "ES5BB" ? state.direct : state.sensor_direct?.[device.model];
+}
+function radioSelection(device, state, requested = "auto") {
+  const now = Date.parse(state.server_time);
+  const history = (device.radio?.history || []).filter(point => qualityForRssi(point.rssi) !== "unknown" && Number.isFinite(Date.parse(point.timestamp)) && Date.parse(point.timestamp) <= now)
+    .slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  const receiver = requested === "auto" ? (history.at(-1)?.receiver || null) : requested;
+  const points = history.filter(point => point.receiver === receiver && now >= Date.parse(point.timestamp) && now - Date.parse(point.timestamp) <= 300000);
+  const summary = device.radio?.receivers?.[receiver] || { count: 0, latest: null, median: null, min: null, max: null, last_sample: null, last_sample_age_seconds: null, max_gap_seconds: null };
+  return { receiver, points, summary, lastObserved: history.filter(point => point.receiver === receiver).at(-1)?.timestamp || null };
+}
+function csvCell(value) {
+  let text = String(value ?? "");
+  if (typeof value !== "number" && /^(?:[\t\r\n]|\s*[=+@-])/.test(text)) text = "'" + text;
+  return '"' + text.replaceAll('"', '""') + '"';
+}
 let latest = null;
 let shown = null;
 let paused = false;
@@ -35,6 +77,31 @@ let connected = false;
 let filter = "all";
 let lastAnnouncedId = 0;
 let initializedSession = null;
+let selectedRadioDevice = null;
+const advancedPanels = new Map(), temperaturePanels = new Map(), radioRowNodes = new Map();
+function domId(address, id) { return `device-${address.replace(/[^a-zA-Z0-9]/g, "")}-${id}`; }
+function clonePanel(templateId, address) {
+  const content = $(templateId).content.cloneNode(true);
+  content.querySelectorAll("[id]").forEach(node => { node.id = domId(address, node.id); });
+  content.querySelectorAll("[for]").forEach(node => { node.htmlFor = domId(address, node.htmlFor); });
+  content.querySelectorAll("[aria-describedby], [aria-labelledby]").forEach(node => {
+    for (const attr of ["aria-describedby", "aria-labelledby"]) if (node.hasAttribute(attr))
+      node.setAttribute(attr, node.getAttribute(attr).split(/\s+/).map(id => domId(address, id)).join(" "));
+  });
+  const element = content.firstElementChild;
+  $("panel-staging").append(content); return element;
+}
+function filterCriteria() { return { query: $("device-search").value, model: $("model-filter").value, address: $("instance-filter").value, radio: $("radio-filter").value }; }
+function visibleDevices(state) { return filterDevices(state.devices, filterCriteria(), state); }
+function deviceLabel(device) { return `${device.name} · ${device.model} · ${device.address.slice(-8)}`; }
+function syncOptions(select, choices) {
+  const signature = JSON.stringify(choices);
+  if (select.dataset.options === signature) return;
+  const original = select.value;
+  select.replaceChildren(...choices.map(([value, label]) => new Option(label, value)));
+  if (choices.some(([value]) => value === original)) select.value = original;
+  select.dataset.options = signature;
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -64,9 +131,9 @@ function cardFront(device, index, state) {
   const front = el("div", "card-front");
   const top = el("div", "card-top");
   const title = el("div");
-  const model = el("h3", "model-line", device.model);
+  const model = el("p", "model-line", device.model);
   model.prepend(el("span", "sensor-number", String(index + 1).padStart(2, "0")));
-  title.append(model, el("p", "card-type", TYPES[device.model] || device.name));
+  title.append(el("h3", "device-name", device.name), model, el("p", "card-type", `${TYPES[device.model] || "感測器"} · ${device.address.slice(-8)}`));
   title.title = device.name;
   const signal = signalState(device, state, { online: connected, frozen: paused });
   const freshness = device.last_error ? "failed" : (signal.level ? "recent" : "waiting");
@@ -132,12 +199,17 @@ const cardNodes = new Map();
 let cardLayout = "";
 function ensureCards(state) {
   const grid = $("sensor-grid");
-  const layout = state.devices.map(device => `${device.address}:${device.model}`).join("|");
+  const layout = state.devices.map(device => `${device.address}:${device.model}:${device.name}`).join("|");
   if (layout !== cardLayout) {
     // Keep the original controls and their event bindings even when a host
     // restarts with a different device list. Never discard mounted panels.
-    for (const id of ["direct-section", "temperature-panel", "KS2BB-sensor-panel", "HS3BB-sensor-panel", "MS1BB-sensor-panel"]) {
-      if ($(id)) $("panel-staging").append($(id));
+    for (const [address, panel] of advancedPanels) {
+      if (state.devices.some(device => device.address === address && device.model === panel.model)) $("panel-staging").append(panel.element);
+      else { panel.element.remove(); advancedPanels.delete(address); sensorOperations.delete(address); }
+    }
+    for (const [address, panel] of temperaturePanels) {
+      if (state.devices.some(device => device.address === address && device.model === "KS2BB")) $("panel-staging").append(panel);
+      else { panel.remove(); temperaturePanels.delete(address); }
     }
     grid.replaceChildren(); cardNodes.clear(); cardLayout = layout;
   }
@@ -149,18 +221,20 @@ function ensureCards(state) {
       card = el("article", "sensor-card"); card.dataset.model = device.model;
       card.setAttribute("aria-label", `${device.model} ${TYPES[device.model] || device.name}`);
       card.append(cardFront(device, index, state));
-      const ownsPanel = state.devices.find(item => item.model === device.model).address === device.address;
-      if (device.model === "KS2BB" && ownsPanel) card.append($("temperature-panel"));
-      const details = el("details", "device-advanced"); details.id = `advanced-${device.model}${ownsPanel ? "" : `-${index}`}`;
+      if (device.model === "KS2BB") {
+        if (!temperaturePanels.has(device.address)) temperaturePanels.set(device.address, clonePanel("temperature-template", device.address));
+        card.append(temperaturePanels.get(device.address));
+      }
+      const details = el("details", "device-advanced"); details.id = domId(device.address, "advanced");
       const summary = el("summary");
       const label = el("span", "advanced-label", "進階設定");
-      label.append(el("span", "visually-hidden", ` · ${device.model}`));
+      label.append(el("span", "visually-hidden", ` · ${deviceLabel(device)}`));
       const status = el("span", "advanced-status", "未直連");
       summary.append(label, status);
       const host = el("div", "advanced-content");
-      const panel = device.model === "ES5BB" ? $("direct-section") : $(`${device.model}-sensor-panel`);
-      if (panel && ownsPanel) host.append(panel);
-      else if (!ownsPanel) host.append(el("p", "direct-note", "直連控制使用同型號第一台已設定裝置。"));
+      if (!advancedPanels.has(device.address)) advancedPanels.set(device.address,
+        device.model === "ES5BB" ? createDirectPanel(device) : createSensorPanel(device));
+      host.append(advancedPanels.get(device.address).element);
       const diagnostic = el("details", "card-decode"); diagnostic.append(el("summary", "", "廣播解析明細"));
       const objects = el("div", "decode-device");
       diagnostic.append(objects); host.append(diagnostic); details.append(summary, host); card.append(details);
@@ -171,10 +245,15 @@ function ensureCards(state) {
 }
 function renderCards(state) {
   ensureCards(state);
+  syncOptions($("instance-filter"), [["all", "所有裝置"], ...state.devices.filter(device => $("model-filter").value === "all" || device.model === $("model-filter").value).map(device => [device.address, deviceLabel(device)])]);
+  const visible = new Set(visibleDevices(state).map(device => device.address));
+  $("device-count").textContent = `${visible.size} / ${state.devices.length} 台`;
+  $("device-empty").hidden = visible.size !== 0;
   state.devices.forEach((device, index) => {
     const card = cardNodes.get(device.address);
+    card.hidden = !visible.has(device.address);
     card.querySelector(".card-front").replaceWith(cardFront(device, index, state));
-    const d = device.model === "ES5BB" ? state.direct : state.sensor_direct?.[device.model];
+    const d = controllerFor(state, device);
     const text = state.mode === "replay" ? "重播模式" : device.model === "MS1BB" ? "廣播資料" :
       d?.calibration?.restore_required ? "需要還原" : !connected ? "主機離線" :
       d?.busy ? "處理中" : d?.authenticated ? (d.streaming?.radar_active ? "雷達即時" : "已直連") : "未直連";
@@ -184,12 +263,13 @@ function renderCards(state) {
 }
 function renderFeed(state) {
   const kind = $("event-kind").value;
-  const entries = state.events.filter((event) => (filter === "all" || event.model === filter) && (kind === "all" || event.kind === kind));
+  const visible = new Set(visibleDevices(state).map(device => device.address));
+  const entries = state.events.filter((event) => visible.has(event.address) && (filter === "all" || event.model === filter) && (kind === "all" || event.kind === kind));
   const nodes = entries.map((event) => {
     const item = el("li"); item.dataset.kind = event.kind;
     const details = el("div");
     const translated = event.text.replace(/^([a-z_]+) · /, (match, key) => FIELD_NAMES[key] ? `${FIELD_NAMES[key]} · ` : match);
-    details.append(el("span", "event-model", event.model), el("span", "event-text", translated));
+    details.append(el("span", "event-model", `${event.name} · ${event.model} · ${event.address.slice(-8)}`), el("span", "event-text", translated));
     const time = el("time", "event-time", timeText(event.timestamp));
     time.dateTime = event.timestamp; time.title = new Date(event.timestamp).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
     item.append(el("span", "event-mark"), details, time);
@@ -208,6 +288,18 @@ function svgEl(name, attrs, text) {
 
 const DIRECT_STATUS = { disconnected: "尚未連線", connecting: "建立藍牙連線中", authenticating: "驗證直連憑證中", reading: "讀取感測器屬性中", writing: "送出設定並回讀中", ready: "已連線", error: "操作未完成" };
 DIRECT_STATUS.stream_switching = "切換訊號串流中";
+function setText(id, value) { if ($(id).textContent !== value) $(id).textContent = value; }
+function propertyText(prop) {
+  if (prop?.status === "invalid_value") return `未定義值：${fmt(prop.value)}`;
+  if (prop?.status === "unavailable" && prop.value === null) return "裝置回覆空值";
+  if (!prop || prop.value === null) return "尚未讀取";
+  if (prop.choices?.length && Number.isInteger(prop.value) && prop.choices[prop.value]) return prop.choices[prop.value];
+  if (typeof prop.value === "boolean") return prop.value ? "啟用" : "停用";
+  return fmt(prop.value);
+}
+function createDirectPanel(device) {
+  const element = clonePanel("direct-template", device.address);
+  const $ = id => document.getElementById(domId(device.address, id));
 let directSession = null;
 let directCatalog = "";
 let settingSignature = "";
@@ -377,8 +469,8 @@ function settingField(prop, name) {
     const mask = prop.allowed_mask !== null && prop.allowed_mask !== undefined;
     const choice = mask || prop.choices?.length || prop.format === "bool";
     const control = el(choice ? "select" : "input");
-    control.id = "direct-value"; control.required = true;
-    control.setAttribute("aria-describedby", "direct-value-error direct-current");
+    control.id = domId(device.address, "direct-value"); control.required = true;
+    control.setAttribute("aria-describedby", `${domId(device.address, "direct-value-error")} ${domId(device.address, "direct-current")}`);
     if (choice) {
       if (mask) {
         control.multiple = true; control.size = 6; control.required = false;
@@ -398,8 +490,8 @@ function settingField(prop, name) {
   }
 }
 function directAvailability() {
-  const d = latest?.direct;
-  const locked = !connected || paused || controlPosting || Boolean(pendingControl) || d?.busy || !d;
+  const d = controllerFor(latest, device);
+  const locked = !connected || paused || latest?.mode === "replay" || controlPosting || Boolean(pendingControl) || d?.busy || !d;
   $("direct-connect").disabled = locked || !d.token_configured || d.authenticated;
   $("direct-refresh").disabled = locked || !d.authenticated;
   $("direct-disconnect").disabled = locked || !d.authenticated;
@@ -426,7 +518,7 @@ function directAvailability() {
   $("calibration-restore").disabled = !ready;
 }
 function renderDirect(state) {
-  const d = state.direct;
+  const d = controllerFor(state, device);
   if (directSession !== state.started_at) { directSession = state.started_at; pendingControl = null; completedControl = null; controlFeedback = ""; settingDirty = false; zoneDirty = false; }
   if (!d) {
     setText("direct-status", state.mode === "replay" ? "歷史重播，直連已停用" : "未啟用直連");
@@ -493,19 +585,19 @@ function renderDirect(state) {
   directAvailability();
 }
 async function directRequest(command) {
-  if (controlPosting || paused || !connected) return;
+  if (controlPosting || pendingControl || paused || !connected || latest?.mode === "replay") return;
   const requestSession = latest?.started_at;
   controlPosting = true; controlFeedback = "正在送出操作要求…";
   renderDirect(latest);
   try {
-    const response = await fetch("/api/es5/direct", { method: "POST", headers: { "Content-Type": "application/json", "X-Linptech-Control": "1" }, body: JSON.stringify(command), signal: AbortSignal.timeout(5000) });
+    const response = await fetch("/api/es5/direct", { method: "POST", headers: { "Content-Type": "application/json", "X-Linptech-Control": "1" }, body: JSON.stringify({ ...command, address: device.address }), signal: AbortSignal.timeout(5000) });
     const body = await response.json();
     if (latest?.started_at !== requestSession) return;
     if (!response.ok) throw new Error(body.error || "本機程式未接受此操作。");
     pendingControl = body.id; pendingControlSince = Date.now(); pendingControlSnapshot = new Date(latest.server_time).getTime();
     controlFeedback = "本機程式已接受要求，等待裝置回覆。";
   } catch (error) { if (latest?.started_at === requestSession) controlFeedback = error.name === "TimeoutError" ? "送出要求逾時，請查看最近操作結果再重試。" : error.message; }
-  finally { controlPosting = false; renderDirect(latest); }
+  finally { controlPosting = false; if (element.isConnected) renderDirect(latest); }
 }
 $("direct-connect").addEventListener("click", () => directRequest({ action: "connect" }));
 $("direct-disconnect").addEventListener("click", () => directRequest({ action: "disconnect" }));
@@ -539,14 +631,24 @@ $("direct-value-slot").addEventListener("blur", (event) => { if (!event.target.d
 $("direct-settings").addEventListener("invalid", (event) => settingValidation(event.target), true);
 $("direct-settings").addEventListener("submit", (event) => {
   event.preventDefault();
-  const control = $("direct-value"), prop = latest?.direct?.properties[$("direct-property").value];
+  const control = $("direct-value"), prop = controllerFor(latest, device)?.properties[$("direct-property").value];
   if (control.disabled || !settingDirty || !prop) return;
   settingValidation(control); if (!control.reportValidity()) return;
   const value = control.multiple ? Array.from(control.selectedOptions).reduce((mask, option) => mask | Number(option.value), 0) : prop.format === "bool" ? control.value === "true" : Number(control.value);
   directRequest({ action: "set", property: $("direct-property").value, value });
 });
-function renderTrend(state) {
-  const device = state.devices.find((item) => item.model === "KS2BB");
+  return { element, model: device.model, render: renderDirect, connection() {
+    directAvailability();
+    const d = controllerFor(paused && shown ? shown : latest, device);
+    if (d) { renderPirEnergy(d); renderSignals(d); }
+    const proxy = latest?.transport?.backend === "esphome";
+    setText("direct-guide", `保持供電並放近${proxy ? "ESPHome 代理" : "電腦"}。從手機設定關閉藍牙，短按裝置按鍵後連線；請勿長按重設。`);
+  } };
+}
+function renderTrend(device, panel) {
+  const $ = id => panel.querySelector(`[id="${domId(device.address, id)}"]`);
+  $("trend-latest").textContent = `${fmt(metric(device, "temperature")?.value)} °C`;
+
   const points = temperatureSeries(device);
   const chart = $("trend-chart");
   chart.replaceChildren();
@@ -570,19 +672,19 @@ function renderTrend(state) {
   chart.setAttribute("aria-label", `溫度趨勢：${points.length} 筆讀值，最低 ${fmt(low)}，最高 ${fmt(high)} 攝氏度；最新 ${fmt(points.at(-1).value)} 攝氏度`);
 }
 let sensorSession = null;
-const SENSOR_MODELS = ["KS2BB", "HS3BB", "MS1BB"];
 const sensorOperations = new Map();
 function sensorOperation(model) {
   if (!sensorOperations.has(model)) sensorOperations.set(model, { posting: false, pending: null, pendingSince: 0, pendingSnapshot: 0, completed: null, feedback: "", signature: "", dirty: false });
   return sensorOperations.get(model);
 }
-function sensorUi(model, id) { return $(`${model}-${id}`); }
+function sensorUi(address, id) { return $(domId(address, id)); }
 function renderSensorSettings(state) {
   if (sensorSession !== state.started_at) { sensorSession = state.started_at; sensorOperations.clear(); }
-  SENSOR_MODELS.forEach(model => renderSensorPanel(model, state));
+  state.devices.filter(device => device.model !== "ES5BB").forEach(device => renderSensorPanel(device, state));
 }
-function renderSensorPanel(model, state) {
-  const ui = id => sensorUi(model, id), d = state.sensor_direct?.[model], op = sensorOperation(model);
+function renderSensorPanel(device, state) {
+  const { address, model } = device;
+  const ui = id => sensorUi(address, id), d = controllerFor(state, device), op = sensorOperation(address);
   if (op.pending && d?.last_operation?.id === op.pending && d.last_operation.status !== "pending") { op.pending = null; op.feedback = ""; }
   if (op.pending && d?.last_operation?.id !== op.pending && !d?.busy &&
       Date.now() - op.pendingSince > 2000 && new Date(state.server_time).getTime() > op.pendingSnapshot) {
@@ -609,8 +711,8 @@ function renderSensorPanel(model, state) {
   if (signature !== op.signature) {
     op.signature = signature; op.dirty = false;
     const choice = prop?.choices?.length || prop?.format === "bool", input = el(choice ? "select" : "input");
-    input.id = `${model}-sensor-value`; input.name = "value"; input.required = true;
-    input.setAttribute("aria-describedby", `${model}-sensor-current`);
+    input.id = domId(address, "sensor-value"); input.name = "value"; input.required = true;
+    input.setAttribute("aria-describedby", domId(address, "sensor-current"));
     if (choice) {
       input.append(new Option("請選擇", ""));
       if (prop.format === "bool") input.append(new Option("停用", "false"), new Option("啟用", "true"));
@@ -629,13 +731,14 @@ function renderSensorPanel(model, state) {
     value.append(el("small", "", `${p.siid}.${p.piid} · ${p.status}${p.error ? ` · ${p.error}` : ""}`)); row.append(el("dt", "", p.label), value); return row;
   }));
 }
-async function sensorRequest(model, command) {
-  const op = sensorOperation(model);
+async function sensorRequest(device, command) {
+  const { address, model } = device;
+  const op = sensorOperation(address);
   if (op.posting || op.pending || paused || !connected) return;
   const requestSession = latest?.started_at;
   op.posting = true; op.feedback = "正在送出要求…"; renderSensorSettings(latest);
   try {
-    const response = await fetch("/api/sensor/direct", { method: "POST", headers: { "Content-Type": "application/json", "X-Linptech-Control": "1" }, body: JSON.stringify({ ...command, model }), signal: AbortSignal.timeout(5000) });
+    const response = await fetch("/api/sensor/direct", { method: "POST", headers: { "Content-Type": "application/json", "X-Linptech-Control": "1" }, body: JSON.stringify({ ...command, model, address }), signal: AbortSignal.timeout(5000) });
     const body = await response.json(); if (latest?.started_at !== requestSession) return;
     if (!response.ok) throw new Error(body.error || "本機程式未接受操作。");
     op.pending = body.id; op.pendingSince = Date.now(); op.pendingSnapshot = new Date(latest.server_time).getTime();
@@ -643,22 +746,21 @@ async function sensorRequest(model, command) {
   } catch (error) { op.feedback = error.name === "TimeoutError" ? "送出逾時，請先查看操作結果。" : error.message; }
   finally { op.posting = false; renderSensorSettings(latest); }
 }
-for (const model of SENSOR_MODELS) {
-  const content = $("sensor-settings-template").content.cloneNode(true);
-  content.querySelectorAll("[id]").forEach(node => { node.id = `${model}-${node.id}`; });
-  content.querySelectorAll("[for]").forEach(node => { node.htmlFor = `${model}-${node.htmlFor}`; });
-  $("panel-staging").append(content);
-  const ui = id => sensorUi(model, id);
-  ui("sensor-property").addEventListener("change", () => { sensorOperation(model).signature = ""; if (latest) renderSensorSettings(latest); });
-  ui("sensor-value-slot").addEventListener("input", () => { sensorOperation(model).dirty = true; if (latest) renderSensorSettings(latest); });
-  ui("sensor-connect").addEventListener("click", () => sensorRequest(model, { action: "connect" }));
-  ui("sensor-refresh").addEventListener("click", () => sensorRequest(model, { action: "refresh" }));
-  ui("sensor-disconnect").addEventListener("click", () => sensorRequest(model, { action: "disconnect" }));
+function createSensorPanel(device) {
+  const { address } = device;
+  const element = clonePanel("sensor-settings-template", address);
+  const ui = id => sensorUi(address, id);
+  ui("sensor-property").addEventListener("change", () => { sensorOperation(address).signature = ""; if (latest) renderSensorSettings(latest); });
+  ui("sensor-value-slot").addEventListener("input", () => { sensorOperation(address).dirty = true; if (latest) renderSensorSettings(latest); });
+  ui("sensor-connect").addEventListener("click", () => sensorRequest(device, { action: "connect" }));
+  ui("sensor-refresh").addEventListener("click", () => sensorRequest(device, { action: "refresh" }));
+  ui("sensor-disconnect").addEventListener("click", () => sensorRequest(device, { action: "disconnect" }));
   ui("sensor-settings-form").addEventListener("submit", event => {
-    event.preventDefault(); const input = ui("sensor-value"), prop = latest?.sensor_direct?.[model]?.properties?.[ui("sensor-property").value];
+    event.preventDefault(); const input = ui("sensor-value"), prop = controllerFor(latest, device)?.properties?.[ui("sensor-property").value];
     if (ui("sensor-apply").disabled || !prop || !input.reportValidity()) return;
-    sensorRequest(model, { action: "set", property: ui("sensor-property").value, value: prop.format === "bool" ? input.value === "true" : Number(input.value) });
+    sensorRequest(device, { action: "set", property: ui("sensor-property").value, value: prop.format === "bool" ? input.value === "true" : Number(input.value) });
   });
+  return { element, model: device.model };
 }
 function renderObjects(state) {
   const statusLabels = { decoded: "已解析", unknown_object: "未知物件", unknown_enum: "未知列舉", outside_spec_range: "超出規格", unauthenticated: "未認證" };
@@ -673,6 +775,104 @@ function renderObjects(state) {
     }
   });
 }
+function radioQualityText(quality) { return { strong: "強", fair: "穩定", weak: "偏弱", poor: "微弱", unknown: "無近期樣本" }[quality]; }
+function renderRadio(state) {
+  const devices = visibleDevices(state);
+  const receivers = [...new Set(state.devices.flatMap(device => Object.keys(device.radio?.receivers || {})))].sort();
+  syncOptions($("receiver-filter"), [["auto", "各裝置最近的接收器"], ...receivers.map(receiver => [receiver, receiver === "local" ? "本機藍牙" : receiver])]);
+  const requested = $("receiver-filter").value;
+  const rows = devices.map(device => ({ device, ...radioSelection(device, state, requested) }));
+  setText("radio-total", String(rows.length));
+  setText("radio-observed", String(rows.filter(row => row.summary.count > 0).length));
+  setText("radio-good", String(rows.filter(row => row.summary.count > 0 && row.summary.median >= -75).length));
+  setText("radio-poor", String(rows.filter(row => row.summary.count > 0 && row.summary.median < -90).length));
+  setText("radio-mode", !connected ? "主機離線 · 保留最後讀值" : paused ? "畫面暫停" : state.mode === "replay" ? "歷史資料 · 非現場訊號" : "持續接收 · 5 分鐘觀察窗");
+  if (!devices.some(device => device.address === selectedRadioDevice))
+    selectedRadioDevice = rows.find(row => row.points.length)?.device.address || devices[0]?.address || null;
+  syncOptions($("signal-device"), devices.map(device => [device.address, deviceLabel(device)]));
+  if (selectedRadioDevice) $("signal-device").value = selectedRadioDevice;
+  $("signal-export").disabled = !rows.some(row => row.points.length);
+  const tableRows = rows.map(row => {
+    const { device, summary, receiver } = row;
+    let tr = radioRowNodes.get(device.address);
+    if (!tr) {
+      tr = el("tr");
+      const identity = el("th"); identity.scope = "row";
+      const button = el("button", "sensor-select"); button.type = "button";
+      button.addEventListener("click", () => { selectedRadioDevice = device.address; renderRadio(shown || state); });
+      identity.append(button, el("small"));
+      tr.append(identity, ...Array.from({ length: 7 }, () => el("td")));
+      radioRowNodes.set(device.address, tr);
+    }
+    tr.className = device.address === selectedRadioDevice ? "signal-row-selected" : "";
+    const button = tr.querySelector("button"); button.textContent = device.name;
+    button.setAttribute("aria-pressed", String(device.address === selectedRadioDevice));
+    tr.querySelector("small").textContent = device.address.slice(-8);
+    const latestCell = tr.cells[2], quality = qualityForRssi(summary.latest); latestCell.replaceChildren();
+    latestCell.append(el("strong", "", summary.latest === null ? "—" : `${fmt(summary.latest)} dBm`));
+    const badge = el("span", "quality-tag", radioQualityText(quality)); badge.dataset.quality = quality;
+    latestCell.append(badge);
+    const values = { 1: device.model, 3: summary.median === null ? "—" : `${fmt(summary.median)} dBm`,
+      4: summary.min === null ? "—" : `${fmt(summary.min)}…${fmt(summary.max)}`, 5: String(summary.count),
+      6: row.lastObserved ? ago(row.lastObserved, state.server_time) : "尚未收到", 7: receiver === "local" ? "本機藍牙" : receiver || "—" };
+    Object.entries(values).forEach(([index, value]) => { tr.cells[index].textContent = value; });
+    return tr;
+  });
+  const body = $("signal-rows"), retained = new Set(tableRows);
+  [...body.children].forEach(node => { if (!retained.has(node)) node.remove(); });
+  tableRows.forEach((node, index) => { if (body.children[index] !== node) body.insertBefore(node, body.children[index] || null); });
+  if (!rows.length) {
+    const tr = el("tr"), td = el("td", "empty", "沒有符合條件的裝置"); td.colSpan = 8; tr.append(td); $("signal-rows").append(tr);
+  }
+  renderRadioChart(rows.find(row => row.device.address === selectedRadioDevice), state);
+}
+function renderRadioChart(row, state) {
+  const chart = $("rssi-chart"); chart.replaceChildren();
+  const points = row?.points || [];
+  setText("radio-chart-title", row ? `${row.device.name} · RSSI` : "RSSI 走勢");
+  if (!points.length) {
+    chart.append(svgEl("text", { x: 400, y: 120, "text-anchor": "middle", fill: "#68746b", "font-size": 14 }, "此接收器近 5 分鐘尚無樣本"));
+    chart.setAttribute("aria-label", "RSSI 走勢，近 5 分鐘尚無樣本");
+    setText("rssi-caption", "等待實際廣播；不補值或推算距離。"); return;
+  }
+  const start = Date.parse(state.server_time) - 300000, low = Math.min(-110, ...points.map(point => point.rssi - 5));
+  const high = Math.max(-30, ...points.map(point => point.rssi + 5));
+  const x = timestamp => 50 + (Date.parse(timestamp) - start) / 300000 * 730;
+  const y = value => 200 - (value - low) / (high - low) * 180;
+  [-60, -75, -90].forEach(level => {
+    chart.append(svgEl("line", { x1: 50, x2: 780, y1: y(level), y2: y(level), stroke: level === -75 ? "#8eaa78" : "#dce2d8", "stroke-dasharray": "4 5" }),
+      svgEl("text", { x: 4, y: y(level) + 4, fill: "#68746b", "font-size": 11 }, String(level)));
+  });
+  // Only join neighboring observed samples. Long silent periods remain gaps.
+  let segment = [];
+  const flush = () => { if (segment.length > 1) chart.append(svgEl("polyline", { points: segment.join(" "), fill: "none", stroke: "#356b4b", "stroke-width": 2 })); segment = []; };
+  points.forEach((point, i) => {
+    if (i && Date.parse(point.timestamp) - Date.parse(points[i - 1].timestamp) > 30000) flush();
+    segment.push(`${x(point.timestamp)},${y(point.rssi)}`);
+    const dot = svgEl("circle", { cx: x(point.timestamp), cy: y(point.rssi), r: 2.5, fill: "#356b4b" });
+    dot.append(svgEl("title", {}, `${timeText(point.timestamp)} · ${point.rssi} dBm · ${point.receiver}`)); chart.append(dot);
+  }); flush();
+  chart.append(svgEl("text", { x: 50, y: 228, fill: "#68746b", "font-size": 11 }, timeText(new Date(start).toISOString())),
+    svgEl("text", { x: 780, y: 228, "text-anchor": "end", fill: "#68746b", "font-size": 11 }, timeText(state.server_time)));
+  setText("rssi-caption", `${row.receiver === "local" ? "本機藍牙" : row.receiver} · ${points.length} 筆實際樣本 · 中位數 ${fmt(row.summary.median)} dBm · 最大樣本間隔 ${fmt(row.summary.max_gap_seconds)} 秒`);
+  chart.setAttribute("aria-label", `${row.device.name}，接收器 ${row.receiver}，${points.length} 筆 RSSI 樣本，最低 ${fmt(row.summary.min)}、最高 ${fmt(row.summary.max)} dBm`);
+}
+function exportRadio() {
+  const state = paused && shown ? shown : latest;
+  if (!state) return;
+  const rows = [["timestamp", "name", "model", "address", "receiver", "rssi_dbm"]];
+  for (const device of visibleDevices(state)) for (const point of radioSelection(device, state, $("receiver-filter").value).points)
+    rows.push([point.timestamp, device.name, device.model, device.address, point.receiver, point.rssi]);
+  const url = URL.createObjectURL(new Blob(["\ufeff" + rows.map(row => row.map(csvCell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" }));
+  const link = el("a"); link.href = url; link.download = "linptech-rssi.csv"; link.click(); URL.revokeObjectURL(url);
+}
+function renderView() {
+  const signals = window.location.hash === "#signals";
+  $("device-view").hidden = signals; $("signal-view").hidden = !signals;
+  for (const [id, active] of [["devices-link", !signals], ["signals-link", signals]]) {
+    if (active) $(id).setAttribute("aria-current", "page"); else $(id).removeAttribute("aria-current");
+  }
+}
 function render(state) {
   shown = state;
   $("total-devices").textContent = String(state.devices.length).padStart(2, "0");
@@ -680,7 +880,12 @@ function render(state) {
   $("packet-count").textContent = state.totals.packets.toLocaleString("zh-TW");
   $("event-count").textContent = state.totals.events.toLocaleString("zh-TW");
   renderCards(state);
-  renderFeed(state); renderTrend(state); renderDirect(state); renderSensorSettings(state); renderObjects(state);
+  renderFeed(state);
+  state.devices.forEach(device => {
+    if (device.model === "ES5BB") advancedPanels.get(device.address).render(state);
+    if (device.model === "KS2BB") renderTrend(device, temperaturePanels.get(device.address));
+  });
+  renderSensorSettings(state); renderObjects(state); renderRadio(state);
   $("recording-info").textContent = state.mode === "replay" ? "歷史重播" : "紀錄中 · captures/";
   const newest = state.events[0];
   if (initializedSession !== state.started_at) { initializedSession = state.started_at; lastAnnouncedId = newest?.id || 0; }
@@ -698,15 +903,13 @@ function renderConnection() {
   const bridgeText = [viaProxy ? `接收代理：${latest.transport.proxy_names?.join("、") || "等待設定"} · ES5BB 直連：${latest.transport.gatt_proxy || "請指定代理"}` : "本機藍牙接收", `HA MQTT：${mqtt?.enabled ? mqttStatus : "未啟用"}`].join(" ｜ ");
   $("bridge-status").hidden = !viaProxy && !mqtt?.enabled;
   setText("bridge-status", `${!connected ? "主機連線中斷 · 最後設定：" : ""}${bridgeText}${mqtt?.error ? ` · ${mqtt.error}` : ""}`);
-  setText("direct-guide", `保持供電並放近${viaProxy ? "ESPHome 代理" : "電腦"}。從手機設定關閉藍牙，短按裝置按鍵後連線；請勿長按重設。`);
   const message = !connected ? "網頁與本機程式的連線中斷；畫面保留最後收到的資料，連線恢復後會自動同步。" : (latest?.scanner.error || (paused ? "畫面已暫停；後台持續接收並保存廣播。按「繼續顯示」即可同步最新狀態。" : (latest?.mode === "replay" ? "這是歷史廣播的離線重播，時間與數值不代表裝置目前狀態。" : "")));
   $("notice").textContent = message; $("notice").hidden = !message;
   $("notice").className = `notice${!connected || status === "error" ? " error" : ""}`;
-  directAvailability();
+  advancedPanels.forEach(panel => panel.connection?.());
   if (shown || latest) renderCards(paused && shown ? shown : latest);
   if (latest) renderSensorSettings(paused && shown ? shown : latest);
-  const direct = paused && shown ? shown.direct : latest?.direct;
-  if (direct) { renderPirEnergy(direct); renderSignals(direct); }
+  if (shown || latest) renderRadio(paused && shown ? shown : latest);
 }
 function receive(state) { latest = state; connected = true; ensureCards(state); renderConnection(); if (!paused) render(state); }
 $("pause-button").addEventListener("click", () => {
@@ -724,6 +927,14 @@ $("device-filters").addEventListener("click", (event) => {
   if (shown) renderFeed(shown);
 });
 $("event-kind").addEventListener("change", () => { if (shown) renderFeed(shown); });
+$("device-toolbar").addEventListener("submit", event => event.preventDefault());
+for (const id of ["device-search", "model-filter", "instance-filter", "radio-filter"])
+  $(id).addEventListener(id === "device-search" ? "input" : "change", () => { if (shown) render(shown); });
+$("clear-filters").addEventListener("click", () => { $("device-search").value = ""; ["model-filter", "instance-filter", "radio-filter"].forEach(id => { $(id).value = "all"; }); if (shown) render(shown); });
+$("receiver-filter").addEventListener("change", () => { if (shown) renderRadio(shown); });
+$("signal-device").addEventListener("change", () => { selectedRadioDevice = $("signal-device").value; if (shown) renderRadio(shown); });
+$("signal-export").addEventListener("click", exportRadio);
+window.addEventListener("hashchange", renderView); renderView();
 $("help-button").addEventListener("click", () => $("help-dialog").showModal());
 $("close-help").addEventListener("click", () => $("help-dialog").close());
 function tick() { const now = new Date(); $("clock").textContent = timeFormat.format(now); $("clock").dateTime = now.toISOString(); $("today").textContent = dateFormat.format(now); }

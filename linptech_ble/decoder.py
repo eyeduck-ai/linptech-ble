@@ -46,6 +46,7 @@ class Decoder:
             "address": record.address,
             "name": configured.name if configured else record.name,
             "rssi": record.rssi,
+            "receiver": record.receiver,
             "model": None,
             "status": "no_mibeacon",
             "header": None,
@@ -159,7 +160,7 @@ class Decoder:
                 manufacturer_data={int(k): bytes.fromhex(v) for k, v in record.manufacturer_data.items()},
                 service_data={k: bytes.fromhex(v) for k, v in record.service_data.items()},
                 service_uuids=record.service_uuids,
-                source="windows-local",
+                source=record.receiver,
             )
             # Reuse upstream field/event conversion on a fresh local parser,
             # after our own complete MIC/TLV/type/range validation. The local

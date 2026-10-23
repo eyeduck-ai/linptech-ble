@@ -4,7 +4,7 @@
 
 The public API works independently of the Dashboard, CLI and configuration files. Imports, `DeviceConfig`, `Decoder` construction and client construction do not open Bluetooth or load credentials. Supply your own keys; no Xiaomi account or gateway is required at runtime.
 
-Distributions include the `py.typed` marker for inline type information, including the public GATT connection protocols.
+Distributions include `py.typed`, public import stubs and typed decoder/GATT interfaces. Type checking starts no scanner or application.
 
 ## Decode caller-supplied advertisements
 
@@ -33,6 +33,20 @@ Adapters require a MAC address and advertisement fields. Supply a UTC wall-clock
 
 Keep one decoder for the device inventory. Identical packets received through several proxies within five seconds do not replay button events. Each result still carries its own `receiver`, `rssi` and timestamp, including duplicate results, so applications can record every receiver's signal observation. This is recent-packet suppression, not persistent exactly-once delivery.
 
+### Decoded results
+
+`Decoder.decode()` and `decode_service_info()` return `DecodedAdvertisement`, a `TypedDict`; runtime values remain plain JSON dictionaries. Public `DecodeStatus`, `DeviceModel`, `Measurement`, `BinarySensorValue`, `SensorEvent`, `BroadcastObjectValue` and `MiBeaconHeader` types describe the envelope and nested observations. Additional object metadata is optional.
+
+```python
+from linptech_ble import DecodedAdvertisement, Decoder, AdvertisementRecord
+
+def receive_packet(decoder: Decoder, record: AdvertisementRecord) -> DecodedAdvertisement:
+    result = decoder.decode(record)
+    for measurement in result["measurements"]:
+        print(measurement["key"], measurement["value"], measurement["unit"])
+    return result
+```
+
 Each result describes one packet, not accumulated device state:
 
 | Field | Meaning |
@@ -40,7 +54,7 @@ Each result describes one packet, not accumulated device state:
 | `status` | Decode outcome, such as `decoded`, `duplicate`, `encrypted_no_key` or `decryption_failed` |
 | `bindkey_verified` | Authenticated MIC, or a recent duplicate of an authenticated packet |
 | `measurements` | Numeric observations with `key`, `value`, `unit` and `device_id` |
-| `binary_sensors` / `events` | Explicit Boolean observations and discrete events |
+| `binary_sensors` / `events` | Boolean/null observations and discrete events |
 | `objects` | Object IDs, raw hex, mapping, evidence and parse status |
 
 Missing data stays unknown. Silence is not absence. Unknown objects/enums remain diagnostic; malformed known objects reject the entire packet. Encrypted extensions accept authenticated MiBeacon V4/V5, not Mesh or legacy unauthenticated encryption. Raw decode results may contain addresses and payloads; handle them as application data.
@@ -65,6 +79,8 @@ async def receive(device, decoder, transport=None):
 `AdvertisementScanner(*, transport=None, addresses=None, queue_size=1024)` starts reception only when entered. It yields `AdvertisementRecord` values; it does not read credentials, decode packets, write files or start a Dashboard. The default transport is local BLE; pass `BluetoothConfig` for ESPHome. `addresses` optionally limits sensor MAC addresses. Each instance has one context lifetime and one active iterator on the loop that entered it; create a new instance to restart. Exit the context or call `await scanner.aclose()` to release reception. Cancelling one iterator wait alone leaves its context open.
 
 The queue is bounded and drops oldest records when full. `scanner.health()` reports queue counters, including `counts["dropped"]`, plus receiver health without credentials or packet payloads. Keep processing nonblocking; it is not a lossless recorder. Closing discards buffered records. Applications that already own a scanner should use the adapters above instead of starting a second subscription.
+
+Cross-thread advertisement ingress is bounded before loop dispatch, with one coalesced wakeup rather than one scheduled callback per packet. `health()["ingress"]` reports its capacity, pending packets, delivered/dropped/discarded counts and callback errors. Its capacity matches `queue_size`. ESPHome adds a separate 1,024-packet ingress per subscriber under `health()["transport"]["ingress"]`. These drops are distinct from output-queue drops. GATT notifications use their separate protocol path. Closing during startup waits for backend entry cleanup without awaiting the application task.
 
 ## Authenticated async client
 
@@ -132,7 +148,7 @@ Explicit `transport=` and `connection_factory=` are mutually exclusive. Factory 
 
 Library clients reserve each normalized sensor MAC within one Python process. A competing session fails promptly with `ClientError.code == "device_busy"`; the reservation ends after cleanup. Different sensor addresses can run concurrently, subject to receiver capacity. This guard does not coordinate other applications or processes.
 
-Inspect `client.diagnostics()["connection_cleanup"]` after closing: `status` is `closed`, `timeout`, `error` or `cancelled`, with a sanitized `error_type`; `not_started` means cleanup has not run for an entered context. It resets on the next connection attempt. Cleanup failures do not replace a primary operation error or caller cancellation. The logical MAC reservation is released after cleanup finishes or times out; a failed factory exit does not prove physical disconnection, and the host must resolve its remaining connection resources.
+Inspect `client.diagnostics()["connection_cleanup"]` after closing: `status` is `closed`, `timeout`, `error` or `cancelled`, with a sanitized `error_type`; `not_started` means no entered context has been cleaned up. The aggregate retains the first failed cleanup stage, so a successful factory exit cannot hide a session failure. `cleanup_steps` separately reports `stream_stop`, `session` and `connection`; both diagnostics reset on the next connection attempt. A failed ES5 stream-stop probe cannot skip auth/notification cleanup. Primary errors and caller cancellation are preserved. Releasing the logical MAC reservation does not prove physical disconnection after failed factory cleanup; the host must resolve its connection resources.
 
 ## ES5BB streams and lifecycle
 

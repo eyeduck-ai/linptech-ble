@@ -57,7 +57,31 @@ Battery values appear only when received. A press or movement does not guarantee
 
 Each field keeps its own timestamp. Missing values remain unknown; silence does not become zero, closed or unoccupied. The default 180-second stale threshold marks old reports, and differs from the sensor's own occupancy-clear delay. Change it with `--stale-after 600` if needed.
 
-Pausing the display does not stop reception or recording. Export downloads the current display state and recent history; complete raw and decoded recordings remain in `captures/`. These files can contain device identifiers and should stay private.
+Pausing the display does not stop reception or recording. Export downloads the current display state and recent history. Saved recordings may contain device identifiers and should stay private.
+
+## Recording limits
+
+Live reception works with recording disabled:
+
+```powershell
+python -m linptech_ble dashboard --no-recording --open
+```
+
+Startup options apply to advertisement and advanced GATT recordings:
+
+| Option | Default |
+| --- | --- |
+| `--recording-dir` | `captures` |
+| `--recording-max-bytes` | `10485760` bytes per JSONL part |
+| `--recording-retention-days` | `7`; `0` disables the age limit |
+| `--recording-max-parts` | `100` eligible closed parts |
+| `--recording-queue-size` | `1024` batches per writer |
+
+Writers use bounded background queues and batched flushes. On overload, Dashboard writers drop new recording batches and count them while live reception continues. Disk errors, drops and pending work are reported in `/api/state`: top-level `recording` for advertisements and controller `recording_stats` for GATT. The footer shows recording status. Normal close drains accepted data; forced termination can lose buffered data. A record larger than the part byte limit is rejected and counted.
+
+Managed files use a `linptech-recording-v1-` prefix, an ownership marker and closed-part markers. Retention runs at startup, rotation and close; only proven closed parts are eligible, including rotated parts from other runs. Open or unproven parts, legacy captures, unrelated files and links are preserved. These limits are not a total-directory quota; review preserved historical files separately.
+
+CLI `scan`/`monitor` keep their explicitly selected, non-overwriting output files and stop visibly if recording cannot keep up or the disk fails.
 
 ## Compare signal quality
 

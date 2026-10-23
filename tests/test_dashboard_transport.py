@@ -41,8 +41,9 @@ def services(monkeypatch):
             raise RuntimeError("synthetic startup failure")
 
     class Direct:
-        def __init__(self, sensor, *, on_value, transport):
+        def __init__(self, sensor, *, on_value, transport, recording):
             self.device, self.transport = sensor, transport
+            self.recording = recording
             instances["direct"] = self
 
         def start(self):
@@ -60,8 +61,9 @@ def services(monkeypatch):
                     "token_configured": True}
 
     class Worker:
-        def __init__(self, state, devices, *, replay_path, transport):
+        def __init__(self, state, devices, *, replay_path, transport, recording):
             self.state, self.transport = state, transport
+            self.recording = recording
             instances["worker"] = self
 
         def start(self):
@@ -157,6 +159,8 @@ def test_dashboard_cli_propagates_transport_argument_without_loading_files(monke
     monkeypatch.setattr(dashboard, "serve_dashboard", lambda **kwargs: calls.append(kwargs))
     assert cli.main(["dashboard", "--config", "synthetic-sensors.json", "--transport-config",
                      "synthetic-transport.json", "--port", "8767", "--open"]) == 0
+    recording = calls[0].pop("recording")
+    assert recording.enabled and recording.max_file_bytes == 10 * 1024 * 1024
     assert calls == [{"config": "synthetic-sensors.json", "port": 8767, "open_browser": True,
                       "replay_path": None, "stale_after": 180, "transport_path": "synthetic-transport.json"}]
 

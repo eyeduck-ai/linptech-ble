@@ -250,7 +250,7 @@ def test_connect_refresh_disconnect_only_touches_ks2_profile(monkeypatch, tmp_pa
     assert control.snapshot()["properties"]["button_mode"]["value"] == 1
     assert len(forwarded) == 4
     assert not hasattr(control, "session") and not hasattr(control, "client_context")
-    log = next(tmp_path.glob("ks2bb-direct-*.jsonl")).read_text(encoding="utf-8")
+    log = Path(control.snapshot()["recording"]).read_text(encoding="utf-8")
     assert KEY not in log and TOKEN not in log
 
 
@@ -293,7 +293,7 @@ def test_public_client_open_failures_close_logs_and_keep_old_values_cached(monke
 
     asyncio.run(run())
     assert len(closed) == (0 if failure == "constructor" else 1)
-    for path in tmp_path.glob("ks2bb-direct-*.jsonl"):
+    for path in tmp_path.glob("linptech-recording-v1-*.events.*.jsonl"):
         with path.open("a", encoding="utf-8") as reopened:
             reopened.write("")
 

@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from .config import normalize_address
+from ._ingress import AdvertisementIngress
 
 
 class TransportError(RuntimeError):
@@ -497,6 +498,7 @@ class _RemoteScanner:
         self.closed = False
         self.callback_error = False
         self.callback_tasks: set[asyncio.Task] = set()
+        self.ingress: AdvertisementIngress | None = None
 
     def _detected(self, *args) -> None:
         if self.closed or self.callback_error:
@@ -509,7 +511,7 @@ class _RemoteScanner:
                 task = asyncio.ensure_future(result)
                 self.callback_tasks.add(task)
                 task.add_done_callback(self._callback_done)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             self.callback_error = True
 
     def _callback_done(self, task: asyncio.Task) -> None:
@@ -528,6 +530,7 @@ class _RemoteScanner:
     def health(self) -> dict[str, Any]:
         return {"backend": "esphome", "connected": any(s.state["connected"] for s in self.sessions),
                 "proxies": [dict(s.state) for s in self.sessions],
+                "ingress": self.ingress.snapshot() if self.ingress is not None else None,
                 "callback_error": "廣播回呼失敗或處理速度不足。" if self.callback_error else None}
 
     def check_health(self) -> None:
@@ -539,11 +542,12 @@ class _RemoteScanner:
     async def __aenter__(self):
         _dependencies()
         loop = asyncio.get_running_loop()
+        self.ingress = AdvertisementIngress(loop, self._detected, capacity=1024)
         broker = _broker()
         async def open_all():
             async def open_one(proxy):
                 session = await broker.acquire(proxy, self.config.connect_timeout, self.token,
-                    lambda *args: _deliver(loop, self._detected, *args), wait_ready=False)
+                    self.ingress.put, wait_ready=False)
                 self.sessions.append(session)
             opening = [asyncio.create_task(open_one(proxy)) for proxy in self.config.proxies]
             try:
@@ -576,6 +580,8 @@ class _RemoteScanner:
         if self.closed:
             return
         self.closed = True
+        if self.ingress is not None:
+            self.ingress.close()
         pending = list(self.callback_tasks)
         for task in pending:
             task.cancel()

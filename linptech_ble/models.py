@@ -8,9 +8,10 @@ from typing import Any
 from uuid import UUID
 
 from .config import normalize_address
+from .decoded import DeviceModel, MiBeaconHeader
 
 MIBEACON_UUID = "0000fe95-0000-1000-8000-00805f9b34fb"
-MODEL_IDS = {0x6A0F: "ES5BB", 0x1889: "MS1BB", 0x520B: "KS2BB", 0x50D4: "HS3BB"}
+MODEL_IDS: dict[int, DeviceModel] = {0x6A0F: "ES5BB", 0x1889: "MS1BB", 0x520B: "KS2BB", 0x50D4: "HS3BB"}
 
 
 def canonical_uuid(value: str) -> str:
@@ -84,7 +85,7 @@ class AdvertisementRecord:
         return asdict(self)
 
 
-def mibeacon_header(record: AdvertisementRecord) -> dict[str, Any] | None:
+def mibeacon_header(record: AdvertisementRecord) -> MiBeaconHeader | None:
     """Read only the public header; flags do not prove payload authenticity."""
     raw = record.service_data.get(MIBEACON_UUID)
     if raw is None:

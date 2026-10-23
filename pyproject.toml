@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10", "build>=1.2,<2", "setuptools>=77.0.3,<83", "wheel>=0.45,<1", "jsonschema>=4,<5"]
+test = ["pytest>=8,<10", "build>=1.2,<2", "setuptools>=77.0.3,<83", "wheel>=0.45,<1", "jsonschema>=4,<5", "mypy>=1.15,<2"]
 dashboard = []
 cloud = ["requests>=2.34.2,<3"]
 proxy = ["bleak-esphome>=4.1.0,<4.2", "aioesphomeapi>=46.21.0,<46.22"]
@@ -36,8 +36,16 @@ include = ["linptech_ble*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-linptech_ble = ["py.typed", "web/*.html", "web/*.css", "web/*.js", "web/*.svg", "specs/*.json"]
+linptech_ble = ["py.typed", "*.pyi", "web/*.html", "web/*.css", "web/*.js", "web/*.svg", "specs/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.mypy]
+files = ["linptech_ble/decoded.py", "linptech_ble/decoder.py", "linptech_ble/adapters.py", "linptech_ble/models.py"]
+python_version = "3.11"
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true

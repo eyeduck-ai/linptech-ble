@@ -225,6 +225,118 @@ def test_external_close_cancels_pending_entry_and_awaits_its_partial_cleanup(mon
     asyncio.run(run())
 
 
+def test_external_close_during_entry_does_not_wait_for_owners_reentrant_finally(monkeypatch):
+    async def run():
+        entering, cleaned = asyncio.Event(), asyncio.Event()
+
+        class Opening:
+            async def __aenter__(self):
+                entering.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleaned.set()
+
+            async def __aexit__(self, *_):
+                pytest.fail("Failed entry must not be exited")
+
+        monkeypatch.setattr("linptech_ble.scanner.scanner_context", lambda *_: Opening())
+        scanner = AdvertisementScanner()
+
+        async def owner():
+            try:
+                await scanner.__aenter__()
+            finally:
+                # This ordinary defensive cleanup formerly formed a cycle:
+                # close -> whole owner task -> the same close task.
+                await scanner.aclose()
+
+        opening = asyncio.create_task(owner())
+        await entering.wait()
+        closing = asyncio.create_task(scanner.aclose())
+        await asyncio.wait_for(closing, 1)
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        assert cleaned.is_set() and scanner.health()["closed"]
+
+    asyncio.run(run())
+
+
+def test_repeated_owner_cancel_cannot_interrupt_partial_entry_cleanup(monkeypatch):
+    async def run():
+        entering, cleaning, allow_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        calls = []
+
+        class Opening:
+            async def __aenter__(self):
+                entering.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleaning.set()
+                    await allow_cleanup.wait()
+                    calls.append("cleaned")
+
+            async def __aexit__(self, *_):
+                pytest.fail("Failed entry must not be exited")
+
+        monkeypatch.setattr("linptech_ble.scanner.scanner_context", lambda *_: Opening())
+        scanner = AdvertisementScanner()
+
+        async def owner():
+            try:
+                await scanner.__aenter__()
+            finally:
+                await scanner.aclose()
+
+        opening = asyncio.create_task(owner())
+        await entering.wait()
+        opening.cancel()
+        await cleaning.wait()
+        opening.cancel()
+        await asyncio.sleep(0)
+        assert not opening.done()
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(opening, 1)
+        assert calls == ["cleaned"] and scanner.health()["closed"]
+
+    asyncio.run(run())
+
+
+def test_foreign_thread_burst_is_bounded_before_event_loop_scheduling(monkeypatch, make_record):
+    import threading
+
+    async def run():
+        radio = Radio(monkeypatch)
+        async with AdvertisementScanner(queue_size=2) as scanner:
+            record = make_record("ES5BB", object_bytes(0x484E, b"\x01"))
+            loop = asyncio.get_running_loop()
+            before = len(loop._ready)
+
+            def burst():
+                for index in range(20000):
+                    radio.emit(replace(record, rssi=-30 - index % 60), "foreign-thread")
+
+            producer = threading.Thread(target=burst)
+            producer.start()
+            producer.join()
+            assert len(loop._ready) - before == 1
+            health = scanner.health()
+            assert health["ingress"]["received"] == 20000
+            assert health["ingress"]["queued"] == 2
+            assert health["ingress"]["dropped"] == 19998
+            assert health["queued"] == health["counts"]["dropped"] == 0
+            first = await asyncio.wait_for(anext(scanner), 1)
+            second = await asyncio.wait_for(anext(scanner), 1)
+            assert [first.rssi, second.rssi] == [-48, -49]
+            assert first.receiver == second.receiver == "foreign-thread"
+            assert scanner.health()["counts"]["dropped"] == 0
+        assert scanner.health()["ingress"]["closed"]
+
+    asyncio.run(run())
+
+
 def test_backend_that_completes_entry_after_cancellation_is_exited_without_revival(monkeypatch):
     async def run():
         entering = asyncio.Event()

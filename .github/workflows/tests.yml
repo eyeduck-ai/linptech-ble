@@ -42,3 +42,5 @@ jobs:
         run: node --version
       - name: Run synthetic tests
         run: python -m pytest -q
+      - name: Check public decoder types
+        run: python -m mypy

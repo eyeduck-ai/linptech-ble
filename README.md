@@ -33,6 +33,8 @@ result = decoder.decode(AdvertisementRecord.from_dict(raw_record))
 
 `Decoder` performs no Bluetooth or network I/O. Its model-scoped object catalog extends the existing xiaomi-ble helpers. Reuse it to suppress recent duplicate events. Existing HA/Bleak-compatible scanner data can be passed through `decode_service_info(info, decoder, timestamp=received_at)`. Missing values remain unknown; encrypted extensions require valid MIC, structure and values.
 
+Results remain JSON dictionaries, typed as `DecodedAdvertisement` with `DecodeStatus`, measurement, binary-sensor and event definitions. See the [typed result contract](docs/LIBRARY.md#decoded-results).
+
 For an application that also needs reception, the public `AdvertisementScanner` is an async context and iterator:
 
 ```python

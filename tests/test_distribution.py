@@ -60,7 +60,7 @@ def test_wheel_and_sdist_exclude_all_private_canaries_and_keep_required_resource
         assert "linptech_ble/decoder.py" in files and "linptech_ble/client.py" in files
         assert "linptech_ble/adapters.py" in files and "linptech_ble/web/index.html" in files
         assert "linptech_ble/transport_config.py" in files
-        assert all(f"linptech_ble/{name}" in files for name in ("scanner.py", "gatt.py", "py.typed"))
+        assert all(f"linptech_ble/{name}" in files for name in ("scanner.py", "gatt.py", "decoded.py", "__init__.pyi", "py.typed"))
         assert "linptech_ble/ha_mqtt.py" not in files and "linptech_ble/bridge_config.py" not in files
         assert any(name.startswith("linptech_ble/specs/") and name.endswith(".json") for name in files)
     assert "examples/library_direct.py" in source_data and "CONTRIBUTING.md" in source_data
@@ -120,7 +120,7 @@ pathlib.Path.read_text = forbidden
 import linptech_ble
 assert linptech_ble.__version__ == '0.4.0'
 assert 'LinptechClient' in linptech_ble.__all__
-from linptech_ble import AdvertisementScanner, GattClient, GattConnectionFactory
+from linptech_ble import AdvertisementScanner, GattClient, GattConnectionFactory, DecodedAdvertisement, DecodeStatus
 scanner = AdvertisementScanner()
 assert scanner.health()['listening'] is False
 assert not any(name in sys.modules for name in ('bleak','aioesphomeapi','xiaomi_ble','paho','linptech_ble.dashboard'))

@@ -89,6 +89,8 @@ These synthetic addresses can represent ES5BB, KS2BB and HS3BB respectively. MS1
 
 All configured receivers can observe the same advertisement. Feed them to one `Decoder` to suppress repeated events, while recording every `receiver`/RSSI observation, including results marked `duplicate`. RSSI compares sensor-to-receiver links; it does not measure Wi-Fi or Ethernet quality. See [signal quality](SIGNAL_QUALITY.md).
 
+Advertisement dispatch has bounded ingress per subscriber before crossing event loops. Burst overload drops oldest advertisements and increments ingress counters; it does not discard GATT notifications. Inspect both ingress and public scanner queue drops through `scanner.health()`. These limits contain memory use rather than promise lossless reception.
+
 Reception can start when one proxy is ready while unavailable proxies retry in the background. A partial outage keeps healthy receivers running and reconnects the failed receiver. If all receivers are unavailable, the scanner reports an error; the application decides when to create a new scanner. Inspect per-proxy health rather than treating one working receiver as proof that every room is covered.
 
 ### Migrate an older checkout

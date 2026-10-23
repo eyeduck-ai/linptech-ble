@@ -17,6 +17,7 @@ from .config import DeviceConfig
 from .client import LinptechClient, PropertyValue
 from .property_catalog import CATALOG, PAIR_CATALOG, PROPERTIES, Property
 from .es5_radar import EmptyRoomScan, REPORT_MASK, REPORT_MINUTES, bitmap_data, duration_reporting, hex_series, radar_bins
+from .recording import AsyncRecordingWriter, RecordingConfig
 from .standard_auth import DirectError, PropertyUnavailable
 from .transport import BluetoothConfig, TransportError
 
@@ -45,16 +46,17 @@ def numeric_array(value: Any) -> list[float] | None:
 class DirectController:
     """Dashboard orchestration over LinptechClient; no BLE wire ownership.
 
-    The application owns UI state, polling, the empty-room workflow and durable
+    The application owns UI state, polling, the empty-room workflow and restore
     backups. Authentication, typed observations, verified writes, stream
     transactions and GATT cleanup belong to the public library client.
     """
     OPTIONAL_REFRESH_SECONDS = 12
 
-    def __init__(self, device: DeviceConfig | None, *, recording_dir: Path = Path("captures"), on_value: Any = None, on_backup: Any = None, transport: BluetoothConfig | None = None) -> None:
+    def __init__(self, device: DeviceConfig | None, *, recording_dir: Path = Path("captures"), on_value: Any = None, on_backup: Any = None, transport: BluetoothConfig | None = None, recording: RecordingConfig | None = None) -> None:
         self.device = device
         self.transport = transport or BluetoothConfig()
-        self.recording_dir = recording_dir
+        self.recording_config = recording or RecordingConfig(directory=recording_dir)
+        self.recording_dir = Path(self.recording_config.directory)
         self.on_value = on_value
         self.on_backup = on_backup
         self.lock = threading.RLock()
@@ -64,6 +66,7 @@ class DirectController:
             "error": None, "busy": False, "last_operation": None,
             "client_diagnostics": None,
             "experimental": True, "diagnostics": [], "recording": None,
+            "recording_stats": AsyncRecordingWriter(config=self.recording_config, streams=("events",)).snapshot(),
             "properties": {p.name: {"label": p.label, "siid": p.siid, "piid": p.piid,
                 "format": p.format, "writable": p.writable, "minimum": p.minimum, "maximum": p.maximum,
                 "choices": list(p.choices), "optional": p.optional, "notification_only": p.notification_only,
@@ -86,7 +89,7 @@ class DirectController:
         self.client: LinptechClient | None = None
         self._observations: dict[str, PropertyValue] = {}
         self.thread: threading.Thread | None = None
-        self.log: Any = None
+        self.log: AsyncRecordingWriter | None = None
         self.stop_requested = threading.Event()
         self.started = threading.Event()
         self.next_poll = 0.0
@@ -101,6 +104,7 @@ class DirectController:
         self.cal_backup: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        self._refresh_recording_state()
         with self.lock:
             result = deepcopy(self.state)
         for name in ("motion_energy", "presence_energy", "motion_threshold", "presence_threshold"):
@@ -130,9 +134,55 @@ class DirectController:
         record = {"kind": kind, "at": now_iso(), **values}
         with self.lock:
             self.state["diagnostics"] = [record, *self.state["diagnostics"][:19]]
-        if self.log:
-            self.log.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-            self.log.flush()
+        self._record(record)
+
+    def _refresh_recording_state(self, writer: AsyncRecordingWriter | None = None) -> None:
+        writer = writer or self.log
+        if writer is not None:
+            snapshot = writer.snapshot()
+            self._update(recording_stats=snapshot, recording=snapshot["paths"].get("events"))
+
+    def _record(self, record: dict[str, Any]) -> None:
+        """Enqueue only; disk failures must not interrupt GATT or restoration."""
+        writer = self.log
+        if writer is None:
+            return
+        try:
+            writer.submit({"events": record})
+        except Exception as error:
+            writer._error(error)
+        self._refresh_recording_state(writer)
+
+    async def _recording_io(self, writer: AsyncRecordingWriter, operation) -> None:
+        # Start/close filesystem work off the BLE loop, and finish it before
+        # propagating cancellation so a pending start cannot outlive disconnect.
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception:
+                break
+        try:
+            task.result()
+        except Exception as error:
+            if not writer.failed.is_set():
+                writer._error(error)
+        finally:
+            self._refresh_recording_state(writer)
+        if cancelled is not None:
+            raise cancelled
+
+    async def _open_recording(self) -> None:
+        self.log = AsyncRecordingWriter(config=self.recording_config, streams=("events",), policy="drop_newest")
+        await self._recording_io(self.log, self.log.start)
+
+    async def _close_recording(self) -> None:
+        writer, self.log = self.log, None
+        if writer is not None:
+            await self._recording_io(writer, writer.close)
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
@@ -271,11 +321,9 @@ class DirectController:
     async def _connect(self) -> None:
         await self._disconnect()
         assert self.device and self.device.auth_token
-        self.recording_dir.mkdir(parents=True, exist_ok=True)
-        path = self.recording_dir / f"es5-direct-{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:6]}.jsonl"
-        self.log = path.open("x", encoding="utf-8")
-        self._update(recording=str(path), status="connecting", error=None, firmware=None)
+        self._update(status="connecting", error=None, firmware=None)
         try:
+            await self._open_recording()
             sdk = LinptechClient(self.device, transport=self.transport)
             # Public callbacks are queued. Ignore obsolete observations and
             # those belonging to a client the application already replaced.
@@ -314,9 +362,7 @@ class DirectController:
         record = {"name": prop.name, "label": prop.label, "siid": prop.siid, "piid": prop.piid,
                   "value": observation.value, "updated_at": observation.updated_at,
                   "source": observation.source, "authenticated": True}
-        if self.log:
-            self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
-            self.log.flush()
+        self._record(record)
         if self.on_value:
             self.on_value(record)
         # The typed public observation distinguishes updates from snapshots,
@@ -537,7 +583,7 @@ class DirectController:
             self._cal_state(restore_required=False)
         except BaseException as error:
             self._cal_state(phase="error", restore_required=True,
-                message="未能確認還原，請重新連線後按還原備份。原值保存在直連紀錄的 calibration_backup。")
+                message="未能確認還原，請重新連線後按還原備份。原值備份仍保留在目前工作階段。")
             if not isinstance(error, Exception):
                 raise
             raise DirectError("校正未完成且還原尚未確認；請重新連線後還原備份。") from None
@@ -617,20 +663,20 @@ class DirectController:
         finally:
             if sdk:
                 self._update(client_diagnostics=sdk.diagnostics())
-            if self.log:
-                self.log.close()
-            self.log = None
-            with self.lock:
-                self._observations.clear()
-                for prop in self.state["properties"].values():
-                    if prop["status"] == "read":
-                        prop["status"] = "cached"
-                self.state.update(status="disconnected", authenticated=False)
-                self.state["streaming"].update(active=False, requested=False, mode="off", requested_mode="off",
-                    radar_active=False, pir_active=False)
-                if self.state["calibration"].get("restore_required"):
-                    self.state["calibration"].update(phase="error",
-                        message="連線已結束，原設定還原尚未確認；請重新連線並還原備份。")
-                elif self.state["calibration"]["phase"] in {"countdown", "waiting_empty", "scanning", "radar_wait", "preview"}:
-                    self.state["calibration"].update(phase="cancelled", message="連線已結束，校正未套用。")
-            self.scan, self.cal_kind = None, None
+            try:
+                await self._close_recording()
+            finally:
+                with self.lock:
+                    self._observations.clear()
+                    for prop in self.state["properties"].values():
+                        if prop["status"] == "read":
+                            prop["status"] = "cached"
+                    self.state.update(status="disconnected", authenticated=False)
+                    self.state["streaming"].update(active=False, requested=False, mode="off", requested_mode="off",
+                        radar_active=False, pir_active=False)
+                    if self.state["calibration"].get("restore_required"):
+                        self.state["calibration"].update(phase="error",
+                            message="連線已結束，原設定還原尚未確認；請重新連線並還原備份。")
+                    elif self.state["calibration"]["phase"] in {"countdown", "waiting_empty", "scanning", "radar_wait", "preview"}:
+                        self.state["calibration"].update(phase="cancelled", message="連線已結束，校正未套用。")
+                self.scan, self.cal_kind = None, None

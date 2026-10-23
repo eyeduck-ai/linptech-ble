@@ -143,10 +143,142 @@ def test_scan_callback_io_failure_stops_and_closes_scanner(tmp_path, make_record
     def fail_write(*_):
         raise OSError("synthetic disk full")
 
-    monkeypatch.setattr(runtime, "_write_json", fail_write)
-    with pytest.raises(RuntimeError, match="synthetic disk full"):
+    monkeypatch.setattr(runtime.AsyncRecordingWriter, "_write", fail_write)
+    with pytest.raises(RuntimeError, match="incomplete"):
         asyncio.run(runtime.capture(mode="scan", seconds=1, output=tmp_path / "scan.jsonl"))
     assert instances[0].exited
+
+
+def test_dashboard_recording_disabled_keeps_live_decoder_and_telemetry_without_files(
+    tmp_path, make_record, scanner_factory,
+):
+    from linptech_ble.dashboard import DashboardState
+    from linptech_ble.recording import RecordingConfig
+    pending, instances = scanner_factory
+    packet = make_record("KS2BB", object_bytes(0x560C, b""))
+    pending.extend([packet, packet])
+    devices = [DeviceConfig(ADDRESS, "KS2BB", "Synthetic button", TEST_KEY)]
+    state = DashboardState(devices)
+    stats = asyncio.run(runtime.capture(mode="monitor", seconds=1,
+        output=tmp_path / "must-not-exist.jsonl", devices=devices,
+        recording=RecordingConfig(enabled=False, directory=tmp_path / "never-created"),
+        on_record=state.ingest, on_recording=state.set_recording, quiet=True))
+    assert stats["selected"] == 2 and stats["written"] == stats["raw_written"] == 0
+    snapshot = state.snapshot()
+    assert snapshot["totals"]["packets"] == 2 and snapshot["totals"]["verified"] == 1
+    assert snapshot["recording"]["status"] == "disabled"
+    assert instances[0].exited and list(tmp_path.iterdir()) == []
+
+
+def test_dashboard_disk_failure_stays_visible_while_all_live_packets_are_ingested(
+    tmp_path, make_record, scanner_factory, monkeypatch,
+):
+    from linptech_ble.recording import RecordingConfig
+    pending, instances = scanner_factory
+    pending.extend([make_record("KS2BB", object_bytes(0x560C, b""))] * 3)
+    received, recording = [], []
+    def fail(*_):
+        raise OSError("private path must never appear")
+    monkeypatch.setattr(runtime.AsyncRecordingWriter, "_write", fail)
+    stats = asyncio.run(runtime.capture(mode="monitor", seconds=1,
+        devices=[DeviceConfig(ADDRESS, "KS2BB", "Synthetic", TEST_KEY)],
+        recording=RecordingConfig(directory=tmp_path), on_record=received.append,
+        on_recording=recording.append, quiet=True))
+    assert len(received) == stats["selected"] == 3 and instances[0].exited
+    assert stats["recording"]["status"] == recording[-1]["status"] == "error"
+    assert stats["recording"]["error_type"] == "OSError"
+    assert stats["recording"]["dropped"] == 3 and stats["recording"]["pending"] == 0
+    assert "private path" not in json.dumps(stats)
+
+
+def test_dashboard_cli_forwards_recording_disable_and_limits(monkeypatch):
+    from linptech_ble import dashboard
+    calls = []
+    monkeypatch.setattr(dashboard, "serve_dashboard", lambda **kwargs: calls.append(kwargs))
+    assert cli.main(["dashboard", "--config", "not-read.json", "--no-recording", "--recording-dir", "chosen-recordings",
+                     "--recording-max-bytes", "4096", "--recording-retention-days", "2",
+                     "--recording-max-parts", "9", "--recording-queue-size", "32"]) == 0
+    config = calls[0]["recording"]
+    assert config.enabled is False and config.directory == "chosen-recordings"
+    assert (config.max_file_bytes, config.retention_days, config.max_parts, config.queue_size) == (4096, 2, 9, 32)
+
+
+def test_capture_cancellation_during_writer_start_waits_for_cleanup_before_finishing(
+    tmp_path, scanner_factory, monkeypatch,
+):
+    import threading
+    from linptech_ble.recording import RecordingConfig
+    _, instances = scanner_factory
+    entered, release = threading.Event(), threading.Event()
+    original = runtime.AsyncRecordingWriter._open_part
+    writers = []
+    def slow_open(writer, key):
+        if writer not in writers:
+            writers.append(writer)
+        entered.set()
+        assert release.wait(3)
+        original(writer, key)
+    monkeypatch.setattr(runtime.AsyncRecordingWriter, "_open_part", slow_open)
+    async def run():
+        task = asyncio.create_task(runtime.capture(mode="monitor", seconds=1,
+            recording=RecordingConfig(directory=tmp_path), quiet=True))
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+    assert instances == [] and writers[0].thread is None and writers[0].start_done.is_set()
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    writers[0].close()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_repeated_capture_cancellation_waits_for_bounded_recording_cleanup(
+    tmp_path, scanner_factory, monkeypatch,
+):
+    import threading
+    from linptech_ble.recording import RecordingConfig
+    _, instances = scanner_factory
+    entered, release = threading.Event(), threading.Event()
+    writers, snapshots = [], []
+    original = runtime.AsyncRecordingWriter.close
+    def slow_close(writer):
+        writers.append(writer)
+        entered.set()
+        assert release.wait(3)
+        original(writer)
+    async def forever(_seconds):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(runtime.AsyncRecordingWriter, "close", slow_close)
+    monkeypatch.setattr(runtime, "_wait_duration", forever)
+    async def run():
+        started = asyncio.Event()
+        task = asyncio.create_task(runtime.capture(mode="monitor", seconds=0,
+            recording=RecordingConfig(directory=tmp_path), quiet=True,
+            on_started=started.set, on_recording=snapshots.append))
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        assert await asyncio.to_thread(entered.wait, 2)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+    assert instances[0].exited and len(writers) == 1
+    assert not writers[0].thread.is_alive()
+    assert snapshots[-1]["status"] == "closed" and snapshots[-1]["pending"] == 0
 
 
 def test_replay_synthetic_demo_without_bluetooth(tmp_path, monkeypatch):

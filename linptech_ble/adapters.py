@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 from .models import AdvertisementRecord, canonical_uuid
+from .decoded import DecodedAdvertisement
 
 if TYPE_CHECKING:
     from .decoder import Decoder
@@ -51,7 +52,7 @@ def record_from_service_info(info: Any, *, timestamp: str | datetime | None = No
 
 
 def decode_service_info(info: Any, decoder: Decoder, *, timestamp: str | datetime | None = None,
-                        receiver: str | None = None) -> dict[str, Any]:
+                        receiver: str | None = None) -> DecodedAdvertisement:
     """Feed a caller-owned Decoder, preserving its per-device event deduplication.
 
     The decoder must be passed explicitly; this helper never loads credentials

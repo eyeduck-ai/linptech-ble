@@ -14,6 +14,7 @@ from typing import Any, Callable, ContextManager, TextIO
 from .config import DeviceConfig, normalize_address
 from .decoder import Decoder
 from .models import AdvertisementRecord, is_candidate, mibeacon_header
+from .recording import AsyncRecordingWriter, RecordingConfig, RecordingError
 from .transport import BluetoothConfig, scanner_context
 
 
@@ -48,11 +49,32 @@ async def _wait_duration(seconds: float) -> None:
         await asyncio.Event().wait()
 
 
+async def _close_recording_writer(
+    writer: AsyncRecordingWriter, cancelled: asyncio.CancelledError | None = None,
+) -> None:
+    """Finish the bounded disk cleanup even when cancellation is repeated."""
+    task = asyncio.create_task(asyncio.to_thread(writer.close))
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = cancelled or error
+        except Exception:
+            break
+    try:
+        task.result()
+    except Exception:
+        if cancelled is None:
+            raise
+    if cancelled is not None:
+        raise cancelled
+
+
 async def capture(
     *,
     mode: str,
     seconds: float,
-    output: str | Path,
+    output: str | Path | None = None,
     devices: list[DeviceConfig] | None = None,
     raw_output: str | Path | None = None,
     all_devices: bool = False,
@@ -65,12 +87,29 @@ async def capture(
     on_raw_record: Callable[[AdvertisementRecord], None] | None = None,
     device_source: Callable[[], list[DeviceConfig]] | None = None,
     callback_lock: ContextManager[Any] | None = None,
+    recording: RecordingConfig | None = None,
+    on_recording: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Capture all selected callbacks; only console display is throttled."""
+    """Receive/decode in the inventory transaction; enqueue disk work separately.
+
+    Legacy output paths fail on recording loss. Managed Dashboard recording
+    drops newest batches explicitly while reception/telemetry continue.
+    """
     if mode not in {"scan", "monitor"}:
         raise ValueError("未知的擷取模式。")
-    paths = [output] + ([raw_output] if raw_output else [])
-    _prepare_paths(paths)
+    if recording is None:
+        if output is None:
+            raise ValueError("Capture requires output paths or explicit recording configuration.")
+        paths = [output] + ([raw_output] if raw_output else [])
+        _prepare_paths(paths)
+        primary = "output"
+        writer = AsyncRecordingWriter(paths={primary: output, **({"raw": raw_output} if raw_output else {})}, policy="fail")
+        save_raw = raw_output is not None
+    else:
+        primary = "events" if mode == "monitor" else "raw"
+        writer = AsyncRecordingWriter(config=recording,
+            streams=("events", "raw") if mode == "monitor" else ("raw",), policy="drop_newest")
+        save_raw = mode == "monitor"
     wanted = normalize_address(address) if address else None
     configured_devices = devices or []
     configured = {normalize_address(device.address) for device in configured_devices}
@@ -91,9 +130,16 @@ async def capture(
     finished = asyncio.Event()
     started = time.monotonic()
 
-    with ExitStack() as stack:
-        destination = _open_output(stack, output)
-        raw_destination = _open_output(stack, raw_output) if raw_output else None
+    try:
+        try:
+            await asyncio.to_thread(writer.start)
+        except Exception:
+            if recording is None:
+                raise
+            # A recording disk failure must remain visible without disabling
+            # the live Dashboard receiver and its inventory transaction.
+        if on_recording:
+            on_recording(writer.snapshot())
 
         def process_advertisement(device: Any, advertisement: Any) -> None:
             nonlocal callback_failure, configured_devices, configured, decoder
@@ -119,11 +165,8 @@ async def capture(
                 elif not (wanted or record_address in configured or (not configured_only and is_candidate(record))):
                     return
                 stats["selected"] += 1
-                if raw_destination:
-                    _write_json(raw_destination, record.to_dict())
-                    stats["raw_written"] += 1
                 if decoder is None:
-                    _write_json(destination, record.to_dict())
+                    value = record.to_dict()
                     try:
                         header = mibeacon_header(record) or {}
                         status = "encrypted" if header.get("encrypted") else "advertisement"
@@ -139,7 +182,7 @@ async def capture(
                     immediate = False
                 else:
                     decoded = decoder.decode(record)
-                    _write_json(destination, decoded)
+                    value = decoded
                     status = str(decoded.get("status", "parse_error"))
                     display = json.dumps(decoded, ensure_ascii=False, default=str)
                     state = json.dumps(
@@ -152,7 +195,7 @@ async def capture(
                     )
                     if status != "duplicate":
                         last_state[record_address] = state
-                stats["written"] += 1
+                writer.submit({primary: value, **({"raw": record.to_dict()} if save_raw else {})})
                 statuses[status] += 1
                 if on_record is not None:
                     on_record(decoded if decoder is not None else record.to_dict())
@@ -179,32 +222,47 @@ async def capture(
                 f"{mode}：{seconds:g} 秒" if seconds else f"{mode}：持續執行，按 Ctrl+C 結束",
                 flush=True,
             )
-            print(f"輸出：{Path(output).resolve()}", flush=True)
+            if output is not None and recording is None:
+                print(f"輸出：{Path(output).resolve()}", flush=True)
+        async with scanner_context(transport, on_advertisement) as scanner:
+            if on_started is not None:
+                on_started()
+            duration = asyncio.create_task(_wait_duration(seconds))
+            failure = asyncio.create_task(finished.wait())
+            async def watch_transport() -> None:
+                while True:
+                    if hasattr(scanner, "check_health"):
+                        scanner.check_health()
+                    if on_recording:
+                        on_recording(writer.snapshot())
+                    if recording is None and writer.failed.is_set():
+                        raise RecordingError("Recording failed; capture is incomplete.")
+                    await asyncio.sleep(.25)
+            health = asyncio.create_task(watch_transport())
+            try:
+                done, _ = await asyncio.wait({duration, failure, health}, return_when=asyncio.FIRST_COMPLETED)
+                if health in done:
+                    await health
+            finally:
+                for task in (duration, failure, health):
+                    task.cancel()
+                await asyncio.gather(duration, failure, health, return_exceptions=True)
+        if callback_failure is not None:
+            raise RuntimeError(f"擷取回呼失敗：{callback_failure}") from callback_failure
+    finally:
+        active_error = sys.exc_info()[1]
         try:
-            async with scanner_context(transport, on_advertisement) as scanner:
-                if on_started is not None:
-                    on_started()
-                duration = asyncio.create_task(_wait_duration(seconds))
-                failure = asyncio.create_task(finished.wait())
-                async def watch_transport() -> None:
-                    while True:
-                        if hasattr(scanner, "check_health"):
-                            scanner.check_health()
-                        await asyncio.sleep(1)
-                health = asyncio.create_task(watch_transport())
-                try:
-                    done, _ = await asyncio.wait({duration, failure, health}, return_when=asyncio.FIRST_COMPLETED)
-                    if health in done:
-                        await health
-                finally:
-                    for task in (duration, failure, health):
-                        task.cancel()
-                    await asyncio.gather(duration, failure, health, return_exceptions=True)
-            if callback_failure is not None:
-                raise RuntimeError(f"擷取回呼失敗：{callback_failure}") from callback_failure
+            await _close_recording_writer(writer,
+                active_error if isinstance(active_error, asyncio.CancelledError) else None)
         finally:
+            snapshot = writer.snapshot()
+            stats["written"] = snapshot["written"].get(primary, 0)
+            stats["raw_written"] = snapshot["written"].get("raw", 0) if save_raw else 0
+            stats["recording"] = snapshot
             stats["statuses"] = dict(statuses)
             stats["elapsed_seconds"] = round(time.monotonic() - started, 2)
+            if on_recording:
+                on_recording(snapshot)
             if not quiet:
                 _summary(stats)
     return stats

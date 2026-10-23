@@ -83,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--transport-config", help="本機／ESPHome 藍牙連線設定；與 sensors 設定分開保存")
     dashboard.add_argument("--stale-after", type=_seconds, default=180,
                            help="多久未收到廣播標為較久未更新；預設 180 秒，不表示離線")
+    dashboard.add_argument("--no-recording", action="store_true", help="保持即時接收，但不建立擷取檔")
+    dashboard.add_argument("--recording-dir", default="captures", help="受管理擷取檔目錄；舊檔不會被接管")
+    dashboard.add_argument("--recording-max-bytes", type=int, default=10 * 1024 * 1024, help="每個 JSONL 分段的位元組上限")
+    dashboard.add_argument("--recording-retention-days", type=_seconds, default=7, help="保留天數；0 只停用天數限制")
+    dashboard.add_argument("--recording-max-parts", type=int, default=100, help="保留已關閉分段數；不包含使用中的檔案")
+    dashboard.add_argument("--recording-queue-size", type=int, default=1024, help="背景寫入佇列容量；滿時丟棄最新紀錄並計數")
     return parser
 
 
@@ -209,11 +215,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "dashboard":
             from .dashboard import serve_dashboard
+            from .recording import RecordingConfig
             if not 1 <= args.port <= 65535 or args.stale_after <= 0:
                 raise ValueError("port 必須介於 1～65535；stale-after 必須大於 0。")
             serve_dashboard(config=args.config, port=args.port, open_browser=args.open,
                             replay_path=args.replay, stale_after=args.stale_after,
-                            transport_path=args.transport_config)
+                            transport_path=args.transport_config,
+                            recording=RecordingConfig(enabled=not args.no_recording, directory=args.recording_dir,
+                                max_file_bytes=args.recording_max_bytes, retention_days=args.recording_retention_days,
+                                max_parts=args.recording_max_parts, queue_size=args.recording_queue_size))
             return 0
         if args.command == "import-keys":
             from .xiaomi_import import import_keys

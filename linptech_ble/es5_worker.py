@@ -13,13 +13,13 @@ from .es5_direct import DirectController, now_iso
 from .standard_auth import DirectError
 
 
-def _worker_main(device, recording_dir, pipe, backup, restore_required, transport=None) -> None:
+def _worker_main(device, recording_dir, pipe, backup, restore_required, transport=None, recording=None) -> None:
     controller_type = DirectController
     if device is not None and device.model != "ES5BB":
         from .sensor_direct import SensorDirectController
         controller_type = SensorDirectController
     controller = controller_type(device, recording_dir=recording_dir,
-        transport=transport,
+        transport=transport, recording=recording,
         on_value=lambda record: pipe.send(("value", record)),
         on_backup=lambda backup: pipe.send(("backup", backup)))
     controller.cal_backup = backup
@@ -86,7 +86,8 @@ class ProcessDirectController(DirectController):
         self.pipe = parent
         self.worker = self.context.Process(target=_worker_main,
             args=(self.device, self.recording_dir, child, self.cal_backup,
-                  bool(self.state["calibration"].get("restore_required")), self.transport), daemon=True, name="es5-ble-worker")
+                  bool(self.state["calibration"].get("restore_required")), self.transport,
+                  self.recording_config), daemon=True, name="es5-ble-worker")
         try:
             self.worker.start()
         except BaseException:

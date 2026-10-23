@@ -79,6 +79,31 @@ function es5FieldView(device, state, key) {
   return { entry, missing: disabled ? "未啟用" : "本輪未上報", detail: disabled ? "本次直連讀值：近距關注範圍已停用。" : notes[key] };
 }
 function canDisconnect(direct) { return Boolean(direct && (direct.authenticated || direct.status === "error")); }
+function recordingFooter(state, online = true) {
+  if (state?.mode === "replay") return "歷史重播 · 不寫入紀錄";
+  const count = value => Number.isSafeInteger(value) && value > 0 ? value : 0;
+  const labels = { idle: "準備中", starting: "準備中", running: "中", closing: "收尾中", closed: "已停止" };
+  const label = stats => stats?.status === "error" ? "異常" :
+    stats?.enabled === false || stats?.status === "disabled" ? "已停用" :
+    (Object.hasOwn(labels, stats?.status) ? labels[stats.status] : "狀態未知");
+  const advertisement = state?.recording;
+  const parts = [`廣播紀錄${label(advertisement)}${count(advertisement?.errors) && advertisement?.status !== "error" ? "（曾異常）" : ""}`];
+  const controllers = state?.direct_devices && Object.keys(state.direct_devices).length ?
+    Object.values(state.direct_devices) : [state?.direct, ...Object.values(state?.sensor_direct || {})];
+  const direct = [...new Set(controllers)].map(controller => controller?.recording_stats).filter(Boolean);
+  const active = direct.filter(stats => !["idle", "disabled"].includes(stats.status) || count(stats.errors) || count(stats.dropped));
+  if (active.length) {
+    const running = active.some(stats => stats.status === "running" && stats.enabled !== false);
+    const error = active.some(stats => stats.status === "error" || count(stats.errors));
+    const status = running ? (error ? "中（部分異常）" : "中") : error ? "異常" :
+      active.some(stats => stats.status === "starting") ? "準備中" :
+      active.every(stats => stats.status === "closed") ? "已停止" : "狀態未知";
+    parts.push(`直連紀錄${status}`);
+  }
+  const dropped = [advertisement, ...direct].reduce((total, stats) => Math.min(Number.MAX_SAFE_INTEGER, total + count(stats?.dropped)), 0);
+  if (dropped) parts.push(`已漏記 ${numberFormat.format(dropped)} 筆`);
+  return `${online ? "" : "最後狀態 · "}${parts.join(" · ")}`;
+}
 let latest = null;
 let shown = null;
 let paused = false;
@@ -660,6 +685,7 @@ function svgEl(name, attrs, text) {
 const DIRECT_STATUS = { disconnected: "尚未連線", connecting: "建立藍牙連線中", authenticating: "驗證直連憑證中", reading: "讀取感測器屬性中", writing: "送出設定並回讀中", ready: "已連線", error: "操作未完成" };
 DIRECT_STATUS.stream_switching = "切換訊號串流中";
 function setText(id, value) { if ($(id).textContent !== value) $(id).textContent = value; }
+function renderRecording(state, online) { setText("recording-info", recordingFooter(state, online)); }
 function propertyText(prop) {
   if (prop?.status === "invalid_value") return `未定義值：${fmt(prop.value)}`;
   if (prop?.status === "unavailable" && prop.value === null) return "裝置回覆空值";
@@ -1259,12 +1285,12 @@ function render(state) {
     if (device.model === "KS2BB") renderTrend(device, temperaturePanels.get(device.address));
   });
   renderSensorSettings(state); renderObjects(state); renderRadio(state);
-  $("recording-info").textContent = state.mode === "replay" ? "歷史重播" : "紀錄中 · captures/";
   const newest = state.events[0];
   if (initializedSession !== state.started_at) { initializedSession = state.started_at; lastAnnouncedId = newest?.id || 0; }
   if (newest && newest.id > lastAnnouncedId) { $("announcer").textContent = `${newest.model}，${newest.text}`; lastAnnouncedId = newest.id; }
 }
 function renderConnection() {
+  renderRecording(latest, connected);
   const status = latest?.scanner.status;
   const labels = { starting: "正在啟動藍牙接收", listening: "藍牙廣播監聽中", stopped: "藍牙監聽已停止", replaying: "離線重播中", replay_complete: "離線重播完成", error: "接收程式發生異常" };
   $("connection-text").textContent = connected ? (labels[status] || "已連接本機監控台") : "連線中斷，正在重新連線";
@@ -1274,7 +1300,7 @@ function renderConnection() {
   const receiverText = viaProxy ? `接收代理：${latest.transport.proxy_names?.join("、") || "等待設定"} · 直連代理：${latest.transport.gatt_proxy || "尚未指定"}` : "本機藍牙接收";
   $("transport-status").hidden = !viaProxy;
   setText("transport-status", `${!connected ? "主機連線中斷 · 最後設定：" : ""}${receiverText}`);
-  const message = !connected ? "網頁與本機程式的連線中斷；畫面保留最後收到的資料，連線恢復後會自動同步。" : (latest?.scanner.error || (paused ? "畫面已暫停；後台持續接收並保存廣播。按「繼續顯示」即可同步最新狀態。" : (latest?.mode === "replay" ? "這是歷史廣播的離線重播，時間與數值不代表裝置目前狀態。" : "")));
+  const message = !connected ? "網頁與本機程式的連線中斷；畫面保留最後收到的資料，連線恢復後會自動同步。" : (latest?.scanner.error || (paused ? "畫面已暫停；後台持續接收廣播。按「繼續顯示」即可同步最新狀態。" : (latest?.mode === "replay" ? "這是歷史廣播的離線重播，時間與數值不代表裝置目前狀態。" : "")));
   $("notice").textContent = message; $("notice").hidden = !message;
   $("notice").className = `notice${!connected || status === "error" ? " error" : ""}`;
   advancedPanels.forEach(panel => panel.connection?.());

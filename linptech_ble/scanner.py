@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import normalize_address
 from .models import AdvertisementRecord
+from ._ingress import AdvertisementIngress
 from .transport import BluetoothConfig, TransportError, scanner_context
 
 _END = object()
@@ -53,7 +54,7 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
         self._health_task: asyncio.Task | None = None
         self._close_task: asyncio.Task | None = None
         self._opening_task: asyncio.Task | None = None
-        self._close_caller: asyncio.Task | None = None
+        self._ingress: AdvertisementIngress | None = None
         self._closing = False
         self._counts = {key: 0 for key in ("received", "selected", "yielded", "dropped", "invalid", "discarded_on_close")}
 
@@ -89,13 +90,15 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
         if same_loop:
             self._receive(device, advertisement)
         else:
-            with suppress(RuntimeError):
-                self._loop.call_soon_threadsafe(self._receive, device, advertisement)
+            if self._ingress is not None:
+                self._ingress.put(device, advertisement)
 
     def _finish(self) -> None:
         if self._ended:
             return
         self._ended = True
+        if self._ingress is not None:
+            self._ingress.close()
         if self._queue is not None:
             while not self._queue.empty():
                 self._queue.get_nowait()
@@ -119,11 +122,20 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
         self._used = True
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue(self.queue_size)
+        self._ingress = AdvertisementIngress(self._loop, self._receive, capacity=self.queue_size)
         self._context = scanner_context(self.transport, self._callback)
-        self._opening_task = asyncio.current_task()
-        try:
+
+        async def enter_backend():
+            # This task owns only backend entry, not the caller's surrounding
+            # coroutine/finally block. A late successful entry still needs exit.
             self._scanner = await self._context.__aenter__()
             self._entered = True
+
+        self._opening_task = asyncio.create_task(enter_backend(), name="linptech-advertisement-open")
+        try:
+            # Caller cancellation is handled by aclose's protected cleanup;
+            # repeated cancellation cannot interrupt partial backend cleanup.
+            await asyncio.shield(self._opening_task)
             if self._closing:
                 # A backend may complete entry while reacting to cancellation.
                 # The external close owns exit; never revive a closed stream.
@@ -132,10 +144,8 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
             return self
         except BaseException as error:
             self._finish()
-            if self._entered and not self._closing:
+            if not self._closing:
                 await self.aclose()
-            elif not self._entered:
-                self._closed = True
             if isinstance(error, (asyncio.CancelledError, TransportError)):
                 raise
             raise TransportError(f"Bluetooth scanning could not start ({type(error).__name__}).") from None
@@ -181,12 +191,15 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
             "closed": self._closed, "queue_size": self.queue_size,
             "queued": 0 if self._ended or self._queue is None else self._queue.qsize(),
             "counts": self._counts, "transport": transport,
+            "ingress": self._ingress.snapshot() if self._ingress is not None else {
+                "capacity": self.queue_size, "queued": 0, "closed": self._closed, "wakeup_failed": False,
+                "received": 0, "delivered": 0, "dropped": 0, "discarded_on_close": 0, "callback_errors": 0},
             "error": str(self._failure) if self._failure else None})
 
     async def _close(self) -> None:
         self._finish()
         opening = self._opening_task
-        if opening is not None and opening is not self._close_caller:
+        if opening is not None:
             # Failed __aenter__ cleanup belongs to the backend context. Wait
             # for it before discarding the context or reporting a closed scan.
             opening.cancel()
@@ -214,7 +227,6 @@ class AdvertisementScanner(AsyncIterator[AdvertisementRecord]):
         self._check_loop()
         if self._close_task is None:
             self._closing = True
-            self._close_caller = asyncio.current_task()
             self._close_task = asyncio.create_task(self._close(), name="linptech-advertisement-close")
         cancelled = None
         while not self._close_task.done():

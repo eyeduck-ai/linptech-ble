@@ -988,3 +988,79 @@ def test_cleanup_releases_physical_claim_even_if_session_task_already_ended(remo
             replacement.check_health()
 
     asyncio.run(run())
+
+
+def test_proxy_burst_uses_bounded_subscriber_mailboxes_and_close_drops_pending_records(remote_api, make_record):
+    async def run():
+        first_rows, second_rows, fresh_rows = [], [], []
+        first_context = scanner_context(config("room"), lambda *args: first_rows.append(args))
+        first = await first_context.__aenter__()
+        try:
+            async with scanner_context(config("room"), lambda *args: second_rows.append(args)) as second:
+                record = make_record("ES5BB", object_bytes(0x484E, b"\x01"))
+                broker = transport._broker()
+
+                async def burst():
+                    for index in range(20000):
+                        remote_api.instances[0].emit(replace(record, rssi=-30 - index % 60))
+
+                before = len(asyncio.get_running_loop()._ready)
+                # Keep the caller loop occupied while a real broker-loop callback
+                # floods both subscribers, reproducing the old prequeue leak.
+                asyncio.run_coroutine_threadsafe(burst(), broker.loop).result(timeout=5)
+                assert len(asyncio.get_running_loop()._ready) - before == 2
+                for scanner in (first, second):
+                    health = scanner.health()["ingress"]
+                    assert health["received"] == 20000 and health["queued"] == 1024
+                    assert health["dropped"] == 18976 and health["delivered"] == 0
+                await first_context.__aexit__(None, None, None)
+                async with asyncio.timeout(2):
+                    while len(second_rows) != 1024:
+                        await asyncio.sleep(.005)
+                assert first_rows == [] and first.health()["ingress"]["discarded_on_close"] == 1024
+                assert second_rows[-1][1].rssi == -49
+                assert {device.details["source"] for device, _ in second_rows} == {"room"}
+                async with scanner_context(config("room"), lambda *args: fresh_rows.append(args)):
+                    assert len(remote_api.instances) == 1 and remote_api.instances[0].ad_subscriptions == 1
+                    remote_api.instances[0].emit(record)
+                    async with asyncio.timeout(1):
+                        while not fresh_rows or len(second_rows) != 1025:
+                            await asyncio.sleep(.005)
+                    assert first_rows == []
+        finally:
+            await first_context.__aexit__(None, None, None)
+
+    asyncio.run(run())
+
+
+def test_gatt_notifications_bypass_lossy_advertisement_mailbox(remote_api, make_record, monkeypatch):
+    from linptech_ble.standard_auth import StandardSession
+    from test_standard_auth import TOKEN, APP_RANDOM
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+
+    async def run():
+        advertisements, properties = [], []
+        async with scanner_context(config("room"), lambda *args: advertisements.append(args)) as scanner:
+            async with connected_client(config("room"), "AA:BB:CC:DD:EE:01") as client:
+                session = StandardSession(client, TOKEN, on_property=properties.append)
+                try:
+                    await session.authenticate()
+                    api = remote_api.instances[0]
+                    record = make_record("ES5BB", object_bytes(0x484E, b"\x01"))
+
+                    async def burst():
+                        for _ in range(20000):
+                            api.emit(record)
+                        for index in range(20):
+                            api.peer.notify_property(200 + index, 6, 11, 0x10, bytes([index % 3]))
+
+                    asyncio.run_coroutine_threadsafe(burst(), transport._broker().loop).result(timeout=5)
+                    assert scanner.health()["ingress"]["dropped"] == 18976
+                    assert (await session.read(6, 11))["value"] == 1
+                    assert len(properties) == 20
+                    assert [value["value"] for value in properties] == [index % 3 for index in range(20)]
+                    assert session.error is None and client.is_connected
+                finally:
+                    await session.close()
+
+    asyncio.run(run())

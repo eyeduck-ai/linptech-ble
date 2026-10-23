@@ -186,6 +186,8 @@ class LinptechClient:
         self._connection_factory = connection_factory
         self._context_entered = False
         self._connection_cleanup = {"status": "not_started", "error_type": None}
+        self._cleanup_steps = {name: {"status": "not_started", "error_type": None}
+                               for name in ("stream_stop", "session", "connection")}
         self._lease_token: object | None = None
         self.auth_timeout = _timeout(auth_timeout, "auth_timeout")
         self.operation_timeout = _timeout(operation_timeout, "operation_timeout")
@@ -260,6 +262,7 @@ class LinptechClient:
             "session_state": "current" if self._session else "last_closed" if session is not None else "not_started",
             "session": session, "stream_mode": self._stream_mode,
             "connection_cleanup": self._connection_cleanup,
+            "cleanup_steps": self._cleanup_steps,
             "stream_mode_is_acknowledgement_only": True,
             "stream_mode_before_close": self._stream_mode_before_close,
             "pir_data_received": bool(self._valid_op4_updates.get("pir_energy", {}).get("count", 0)),
@@ -331,39 +334,17 @@ class LinptechClient:
                 await asyncio.shield(self._close_task)
                 self._close_task = None
             self._closing = False
-            self._opening_task = asyncio.current_task()
             self._connection_cleanup = {"status": "not_started", "error_type": None}
+            self._cleanup_steps = {name: {"status": "not_started", "error_type": None}
+                                   for name in ("stream_stop", "session", "connection")}
             try:
                 self._acquire_gatt_lease()
-                self._context_entered = False
-                if self._connection_factory is None:
-                    self._context = connected_client(self.transport, self._device.address, self._device.name)
-                    self._ble = await self._context.__aenter__()
-                else:
-                    context = self._connection_factory(self._device.address, self._device.name)
-                    if inspect.iscoroutine(context):
-                        context.close()
-                        raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
-                    if not callable(getattr(context, "__aenter__", None)) or not callable(getattr(context, "__aexit__", None)):
-                        raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
-                    self._context = context
-                    try:
-                        self._ble = await asyncio.wait_for(context.__aenter__(), self.connection_timeout)
-                    except asyncio.TimeoutError:
-                        raise ClientError("GATT connection opening timed out.", code="connection_timeout") from None
-                self._context_entered = True
-                if (not self._ble.is_connected or not callable(getattr(self._ble.services, "get_characteristic", None))
-                        or any(not callable(getattr(self._ble, name, None))
-                               for name in ("start_notify", "stop_notify", "write_gatt_char"))):
-                    raise ClientError("Connection factory did not yield a connected GATT client.", code="connection_failed")
-                self._valid_op4_updates = {}
-                self._last_session_diagnostics = None
-                self._stream_mode_before_close = None
-                self._session = StandardSession(self._ble, bytes.fromhex(self._device.auth_token), on_property=self._accept)
-                await asyncio.wait_for(self._session.authenticate(), self.auth_timeout)
-                if self.on_update:
-                    self._callback_queue = asyncio.Queue(self.queue_size)
-                    self._callback_task = asyncio.create_task(self._callbacks(self._callback_queue), name="linptech-callback")
+                # Close owns only this connection operation, never the caller's
+                # task: the caller may await aclose() in its own finally block.
+                self._opening_task = asyncio.create_task(self._open_connection(), name="linptech-open")
+                await self._opening_task
+                if self._closing:
+                    raise asyncio.CancelledError()
             except BaseException as error:
                 # An external close cancels this opening task and then cleans
                 # it up. Waiting for that same close here would form a cycle.
@@ -383,6 +364,39 @@ class LinptechClient:
             finally:
                 self._opening_task = None
         return self
+
+    async def _open_connection(self) -> None:
+        self._context_entered = False
+        if self._connection_factory is None:
+            self._context = connected_client(self.transport, self._device.address, self._device.name)
+            self._ble = await self._context.__aenter__()
+        else:
+            context = self._connection_factory(self._device.address, self._device.name)
+            if inspect.iscoroutine(context):
+                context.close()
+                raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
+            if not callable(getattr(context, "__aenter__", None)) or not callable(getattr(context, "__aexit__", None)):
+                raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
+            self._context = context
+            try:
+                self._ble = await asyncio.wait_for(context.__aenter__(), self.connection_timeout)
+            except asyncio.TimeoutError:
+                raise ClientError("GATT connection opening timed out.", code="connection_timeout") from None
+        self._context_entered = True
+        if self._closing:
+            raise asyncio.CancelledError()
+        if (not self._ble.is_connected or not callable(getattr(self._ble.services, "get_characteristic", None))
+                or any(not callable(getattr(self._ble, name, None))
+                       for name in ("start_notify", "stop_notify", "write_gatt_char"))):
+            raise ClientError("Connection factory did not yield a connected GATT client.", code="connection_failed")
+        self._valid_op4_updates = {}
+        self._last_session_diagnostics = None
+        self._stream_mode_before_close = None
+        self._session = StandardSession(self._ble, bytes.fromhex(self._device.auth_token), on_property=self._accept)
+        await asyncio.wait_for(self._session.authenticate(), self.auth_timeout)
+        if self.on_update:
+            self._callback_queue = asyncio.Queue(self.queue_size)
+            self._callback_task = asyncio.create_task(self._callbacks(self._callback_queue), name="linptech-callback")
 
     def _put(self, queue: asyncio.Queue, value: Any) -> None:
         if queue.full():
@@ -760,6 +774,24 @@ class LinptechClient:
             self._close_waiters.discard(caller)
             self._close_waiter_event.set()
 
+    async def _cleanup_step(self, name: str, operation, timeout: float) -> None:
+        """Attempt each cleanup stage without leaking backend error messages."""
+        try:
+            await asyncio.wait_for(operation(), timeout)
+        except asyncio.TimeoutError:
+            outcome = {"status": "timeout", "error_type": "TimeoutError"}
+        except asyncio.CancelledError:
+            outcome = {"status": "cancelled", "error_type": "CancelledError"}
+        except Exception as error:
+            outcome = {"status": "error", "error_type": type(error).__name__}
+        else:
+            outcome = {"status": "closed", "error_type": None}
+        self._cleanup_steps[name] = outcome
+        # A successful factory exit must not hide a failed auth/stream cleanup.
+        if self._connection_cleanup["status"] in {"not_started", "closed"}:
+            if outcome["status"] != "closed" or name == "connection":
+                self._connection_cleanup = dict(outcome)
+
     async def _close(self) -> None:
         opening = self._opening_task
         if opening and opening is not self._close_caller:
@@ -770,11 +802,14 @@ class LinptechClient:
             self._stream_mode_before_close = self._stream_mode
         try:
             if session:
-                if self.model == "ES5BB" and self._stream_mode != "off" and self._ble and self._ble.is_connected:
-                    with suppress(Exception):
-                        await asyncio.wait_for(session.command(0), self.operation_timeout)
-                with suppress(Exception):
-                    await asyncio.wait_for(session.close(), 5)
+                if self.model == "ES5BB" and self._stream_mode != "off":
+                    async def stop_stream():
+                        # Even a backend connection-state probe may fail. It
+                        # must never prevent mandatory auth/notify cleanup.
+                        if self._ble and self._ble.is_connected:
+                            await session.command(0)
+                    await self._cleanup_step("stream_stop", stop_stream, self.operation_timeout)
+                await self._cleanup_step("session", session.close, 5)
         finally:
             if session:
                 self._last_session_diagnostics = session.diagnostics()
@@ -782,21 +817,14 @@ class LinptechClient:
             self._stream_mode = "off"
             try:
                 if context and (self._connection_factory is None or self._context_entered):
-                    try:
-                        await asyncio.wait_for(context.__aexit__(None, None, None),
+                    if self._context_entered:
+                        await self._cleanup_step("connection", lambda: context.__aexit__(None, None, None),
                             self.connection_timeout if self._connection_factory else self.transport.connect_timeout + 10)
-                    except asyncio.TimeoutError:
-                        if self._context_entered:
-                            self._connection_cleanup = {"status": "timeout", "error_type": "TimeoutError"}
-                    except asyncio.CancelledError:
-                        if self._context_entered:
-                            self._connection_cleanup = {"status": "cancelled", "error_type": "CancelledError"}
-                    except Exception as error:
-                        if self._context_entered:
-                            self._connection_cleanup = {"status": "error", "error_type": type(error).__name__}
                     else:
-                        if self._context_entered:
-                            self._connection_cleanup = {"status": "closed", "error_type": None}
+                        # Built-in transports retain their existing partial-
+                        # entry cleanup, without claiming a completed session.
+                        with suppress(Exception, asyncio.CancelledError):
+                            await asyncio.wait_for(context.__aexit__(None, None, None), self.transport.connect_timeout + 10)
             finally:
                 self._ble, self._context, self._context_entered = None, None, False
                 self._release_gatt_lease()

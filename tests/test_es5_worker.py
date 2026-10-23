@@ -5,6 +5,7 @@ import base64
 from linptech_ble.es5_worker import ProcessDirectController
 from linptech_ble.config import DeviceConfig
 from linptech_ble.transport import BluetoothConfig, ProxyConfig
+from linptech_ble.recording import RecordingConfig
 
 
 def wait_until(predicate, timeout=10):
@@ -79,3 +80,23 @@ def test_stop_is_idempotent_before_start_and_after_partial_spawn(tmp_path):
         transport=BluetoothConfig("esphome", (ProxyConfig("room", "192.0.2.1"),)))
     remote.stop()
     remote.stop()
+
+
+def test_spawn_passes_disabled_recording_configuration_to_worker(tmp_path):
+    config = RecordingConfig(enabled=False, directory=tmp_path / "disabled", max_file_bytes=2048,
+                             max_parts=2, retention_days=1, queue_size=4)
+    c = ProcessDirectController(DeviceConfig("AA:BB:CC:DD:EE:01", "ES5BB", "Synthetic"), recording=config)
+    c.start()
+    try:
+        # A local validation failure returns a child-produced state without
+        # opening BLE; it proves the spawn boundary retained the recording flag.
+        c.submit({"action": "refresh"})
+        wait_until(lambda: c.snapshot()["last_operation"]["status"] == "error")
+        state = c.snapshot()
+        assert not state["recording_stats"]["enabled"]
+        assert state["recording_stats"]["status"] == "disabled"
+        assert state["recording"] is None
+        assert c.recording_config == config
+    finally:
+        c.stop()
+    assert not config.directory.exists()

@@ -6,8 +6,6 @@ are exposed. No cloud calls, pairing, firmware updates, or vendor commands.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
-import json
 from typing import Any
 from uuid import uuid4
 
@@ -37,6 +35,7 @@ class SensorDirectController(DirectController):
         self.state["calibration"].update(available=False, message="此型號未提供本專案的校正流程。")
 
     def snapshot(self):
+        self._refresh_recording_state()
         with self.lock:
             return deepcopy(self.state)
 
@@ -69,11 +68,8 @@ class SensorDirectController(DirectController):
         if not self.catalog or not self.device.auth_token:
             raise DirectError("此型號尚未提供可用設定，或缺少 12-byte Standard Auth token。")
         await self._disconnect()
-        self.recording_dir.mkdir(parents=True, exist_ok=True)
-        path = self.recording_dir / f"{self.device.model.lower()}-direct-{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:6]}.jsonl"
-        self.log = path.open("x", encoding="utf-8")
         self._observations.clear()
-        self._update(status="connecting", error=None, firmware=None, recording=str(path))
+        self._update(status="connecting", error=None, firmware=None)
 
         def on_update(value):
             # The SDK callback worker may deliver a queued observation after a
@@ -82,6 +78,7 @@ class SensorDirectController(DirectController):
                 self._accept(value)
 
         try:
+            await self._open_recording()
             client = LinptechClient(self.device, transport=self.transport, on_update=on_update)
             self.client = client
             await client.connect()
@@ -111,9 +108,7 @@ class SensorDirectController(DirectController):
                   "siid": prop.siid, "piid": prop.piid, "value": observation.value,
                   "updated_at": observation.updated_at, "source": observation.source,
                   "status": observation.status, "error": observation.error, "authenticated": True}
-        if self.log:
-            self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
-            self.log.flush()
+        self._record(record)
         if self.on_value and observation.valid:
             self.on_value(record)
 
@@ -173,6 +168,4 @@ class SensorDirectController(DirectController):
                     if prop["status"] == "read":
                         prop["status"] = "cached"
                 self.state.update(status="disconnected", authenticated=False)
-            if self.log:
-                self.log.close()
-                self.log = None
+            await self._close_recording()

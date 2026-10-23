@@ -13,6 +13,7 @@ from linptech_ble.transport_config import TransportConfig
 from linptech_ble.config import DeviceConfig
 from linptech_ble.dashboard import DashboardServer, DashboardState
 from linptech_ble.es5_worker import ProcessDirectController, ProcessSensorController
+from linptech_ble.recording import RecordingConfig
 from linptech_ble.standard_auth import DirectError
 
 
@@ -24,8 +25,9 @@ def config(number, model="ES5BB", *, token=TOKEN):
 
 
 class Controller:
-    def __init__(self, device, *, on_value=None, transport=None):
+    def __init__(self, device, *, on_value=None, transport=None, recording=None):
         self.device, self.on_value, self.transport = device, on_value, transport
+        self.recording = recording
         self.commands = []
         self.catalog = {} if device.model == "MS1BB" else {"synthetic": True}
 
@@ -115,10 +117,13 @@ def test_gatt_callback_uses_exact_device_address_and_keeps_legacy_callback():
     assert state.snapshot()["devices"][0]["binary_sensors"]["occupancy"]["value"] is False
 
 
-def test_service_constructs_each_instance_routes_callbacks_and_stops_every_controller(monkeypatch):
+@pytest.mark.parametrize("recording_enabled", [True, False])
+def test_service_constructs_each_instance_routes_callbacks_and_stops_every_controller(monkeypatch, recording_enabled):
     devices = [config(1), config(2), config(3, "KS2BB"), config(4, "KS2BB"), config(5, "HS3BB"), config(6, "MS1BB")]
     controllers, started, stopped, autos, snapshot = [], [], [], [], {}
     settings = TransportConfig(es5_auto_connect=True)
+    recording = RecordingConfig(enabled=recording_enabled, directory="synthetic-recordings", queue_size=8, max_parts=2)
+    worker_recordings = []
     monkeypatch.setattr(dashboard, "load_config", lambda _: devices)
     monkeypatch.setattr(dashboard, "load_transport_config", lambda _: settings)
 
@@ -134,6 +139,7 @@ def test_service_constructs_each_instance_routes_callbacks_and_stops_every_contr
     class Worker:
         def __init__(self, state, *args, **kwargs):
             self.state = state
+            worker_recordings.append(kwargs["recording"])
         def start(self):
             self.state.set_scanner("listening")
         def stop(self):
@@ -161,8 +167,10 @@ def test_service_constructs_each_instance_routes_callbacks_and_stops_every_contr
     monkeypatch.setattr(dashboard, "MonitorWorker", Worker)
     monkeypatch.setattr(dashboard, "AutoConnector", Auto)
     monkeypatch.setattr(dashboard, "DashboardServer", Server)
-    dashboard.serve_dashboard(config="synthetic-unused.json")
+    dashboard.serve_dashboard(config="synthetic-unused.json", recording=recording)
     assert len(controllers) == 6 and all(controller.defer_start for controller in controllers)
+    assert all(controller.recording is recording for controller in controllers)
+    assert worker_recordings == [recording]
     assert started == [item.address for item in devices[:-1]]
     assert stopped == [item.address for item in devices]
     assert autos == [devices[0].address, devices[1].address]

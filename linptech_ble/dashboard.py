@@ -15,13 +15,13 @@ import time
 from statistics import median
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
-from uuid import uuid4
 import webbrowser
 
 from .config import DeviceConfig, load_config, normalize_address
 from .decoder import Decoder
 from .models import AdvertisementRecord
 from .runtime import capture
+from .recording import RecordingConfig
 from .es5_direct import DirectController
 from .es5_worker import ProcessDirectController, ProcessSensorController
 from .standard_auth import DirectError
@@ -124,6 +124,7 @@ class DashboardState:
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.event_count = 0
         self.paths: dict[str, str] = {}
+        self.recording: dict[str, Any] = {"enabled": mode == "live", "status": "starting" if mode == "live" else "disabled"}
         self.direct: DirectController | None = None
         self.sensor_direct: dict[str, ProcessSensorController] = {}
         self.direct_devices: dict[str, DirectController] = {}
@@ -148,6 +149,11 @@ class DashboardState:
     def set_scanner(self, status: str, error: str | None = None) -> None:
         with self.lock:
             self.scanner_status, self.scanner_error = status, error
+
+    def set_recording(self, snapshot: dict[str, Any]) -> None:
+        with self.lock:
+            self.recording = deepcopy(snapshot)
+            self.paths = dict(snapshot.get("paths", {}))
 
     def direct_controller(self, model: str, address: str | None = None) -> DirectController | None:
         """Resolve only configured targets; the omitted-address route is legacy."""
@@ -300,7 +306,7 @@ class DashboardState:
                 "totals": {"packets": sum(self.statuses.values()), "statuses": dict(self.statuses),
                            "events": self.event_count, "verified": sum(d["verified"] for d in devices)},
                 "devices": devices, "events": list(self.events),
-                "recording": dict(self.paths),
+                "recording": {**deepcopy(self.recording), **self.paths},
                 "direct": self.direct.snapshot() if self.direct else None,
                 "sensor_direct": {model: controller.snapshot() for model, controller in self.sensor_direct.items()},
                 "direct_devices": {address: controller.snapshot() for address, controller in self.direct_devices.items()},
@@ -313,10 +319,12 @@ class DashboardState:
 
 class MonitorWorker:
     def __init__(self, state: DashboardState, devices: list[DeviceConfig], *, replay_path: Path | None = None,
-                 transport: BluetoothConfig | None = None, retry_seconds: float = 5) -> None:
+                 transport: BluetoothConfig | None = None, retry_seconds: float = 5,
+                 recording: RecordingConfig | None = None) -> None:
         self.state, self.devices, self.replay_path = state, devices, replay_path
         self.transport = transport or BluetoothConfig()
         self.retry_seconds = retry_seconds
+        self.recording = recording or RecordingConfig()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.task: asyncio.Task | None = None
         self.stopping = threading.Event()
@@ -356,22 +364,18 @@ class MonitorWorker:
                 self.state.set_scanner("replay_complete")
             else:
                 while not self.stopping.is_set():
-                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
-                    events = Path("captures") / f"dashboard-{stamp}.events.jsonl"
-                    raw = Path("captures") / f"dashboard-{stamp}.raw.jsonl"
-                    with self.state.lock:
-                        self.state.paths = {"events": str(events), "raw": str(raw)}
                     self.state.set_scanner("starting")
                     try:
                         options = {"transport": self.transport} if self.transport.backend != "local" else {}
                         await capture(
-                            mode="monitor", seconds=0, output=events, raw_output=raw,
+                            mode="monitor", seconds=0, recording=self.recording,
                             devices=self.devices, configured_only=True, quiet=True,
                             on_record=self.state.ingest,
                             on_raw_record=lambda record: self.state.inventory.discovery.observe(record)
                                 if self.state.inventory else None,
                             device_source=lambda: self.state.inventory.source() if self.state.inventory else self.devices,
                             callback_lock=self.state.inventory.lock if self.state.inventory else None,
+                            on_recording=self.state.set_recording,
                             on_started=lambda: self.state.set_scanner("listening"), **options,
                         )
                         self.state.set_scanner("stopped")
@@ -703,9 +707,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool = False,
                     replay_path: str | Path | None = None, stale_after: float = 180,
-                    transport_path: str | Path | None = None) -> None:
+                    transport_path: str | Path | None = None,
+                    recording: RecordingConfig | None = None) -> None:
     if replay_path is not None and transport_path is not None:
         raise ValueError("離線重播不使用連線設定；請移除 --transport-config。")
+    if recording is not None and not isinstance(recording, RecordingConfig):
+        raise TypeError("recording must be RecordingConfig or None.")
+    recording = recording or RecordingConfig()
     settings = load_transport_config(transport_path)
     devices = load_config(config)
     source = Path(replay_path) if replay_path else None
@@ -716,6 +724,7 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
     def make_controller(device):
         controller_type = ProcessDirectController if device.model == "ES5BB" else ProcessSensorController
         controller = controller_type(device, transport=settings.bluetooth,
+            recording=recording,
             on_value=lambda record, address=device.address: state.ingest_direct({**record, "address": address}))
         controller.defer_start = True
         return controller
@@ -730,7 +739,8 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
                 state.sensor_direct.setdefault(device.model, controller)
     # Bind before starting BLE so an occupied port cannot leave an orphan scanner.
     server = DashboardServer(state, port)
-    worker = MonitorWorker(state, devices, replay_path=source, transport=settings.bluetooth)
+    worker = MonitorWorker(state, devices, replay_path=source, transport=settings.bluetooth,
+                           recording=recording)
     autos = [AutoConnector(controller, retry_seconds=settings.es5_retry_seconds,
                           ready=lambda: state.scanner_status == "listening",
                           submit=lambda command, controller=controller: state.inventory.submit_auto(controller, command)

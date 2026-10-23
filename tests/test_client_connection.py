@@ -108,6 +108,183 @@ def test_core_stops_owned_stream_and_notifications_before_factory_disconnect():
     asyncio.run(run())
 
 
+def test_broken_connection_state_during_stream_close_cannot_skip_auth_cleanup():
+    class BrokenState(Peer):
+        broken = False
+
+        @property
+        def is_connected(self):
+            if self.broken:
+                raise RuntimeError(PRIVATE)
+            return self._connected
+
+        @is_connected.setter
+        def is_connected(self, value):
+            self._connected = value
+
+    async def run():
+        factory = Factory(BrokenState)
+        client = LinptechClient(device(), connection_factory=factory)
+        await client.connect()
+        await client.set_stream("radar")
+        session = client._session
+        factory.peers[0].broken = True
+        await client.aclose()
+        assert session.cipher is None and session._token == b""
+        assert not session.reader and not factory.peers[0].callbacks
+        assert factory.exits[0]["callbacks"] == []
+        diagnostic = client.diagnostics()
+        assert diagnostic["connection_cleanup"] == {"status": "error", "error_type": "RuntimeError"}
+        assert diagnostic["cleanup_steps"] == {
+            "stream_stop": {"status": "error", "error_type": "RuntimeError"},
+            "session": {"status": "closed", "error_type": None},
+            "connection": {"status": "closed", "error_type": None},
+        }
+        assert PRIVATE not in json.dumps(diagnostic) and TOKEN.hex() not in json.dumps(diagnostic)
+        async with LinptechClient(device(), connection_factory=Factory()):
+            pass  # Cleanup released the same-MAC lease despite the backend error.
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error_type,status", [(RuntimeError, "error"), (asyncio.CancelledError, "cancelled")])
+def test_session_close_failure_is_not_hidden_by_successful_factory_exit(error_type, status):
+    async def run():
+        factory = Factory()
+        client = LinptechClient(device(), connection_factory=factory)
+        await client.connect()
+        session = client._session
+        original = session.close
+        async def failing_close():
+            await original()
+            raise error_type(PRIVATE)
+        session.close = failing_close
+        await client.aclose()
+        assert session.cipher is None and session._token == b"" and not factory.peers[0].callbacks
+        diagnostic = client.diagnostics()
+        outcome = {"status": status, "error_type": error_type.__name__}
+        assert diagnostic["connection_cleanup"] == outcome
+        assert diagnostic["cleanup_steps"]["session"] == outcome
+        assert diagnostic["cleanup_steps"]["connection"]["status"] == "closed"
+        assert PRIVATE not in json.dumps(diagnostic)
+        diagnostic["cleanup_steps"]["session"]["status"] = "changed externally"
+        assert client.diagnostics()["cleanup_steps"]["session"]["status"] == status
+        await client.connect()
+        assert all(step["status"] == "not_started" for step in client.diagnostics()["cleanup_steps"].values())
+        await client.aclose()
+        assert client.diagnostics()["connection_cleanup"]["status"] == "closed"
+    asyncio.run(run())
+
+
+def test_session_cleanup_timeout_does_not_skip_context_exit(monkeypatch):
+    original_wait = asyncio.wait_for
+    async def short_session_timeout(awaitable, timeout):
+        return await original_wait(awaitable, .02 if timeout == 5 else timeout)
+    monkeypatch.setattr("linptech_ble.client.asyncio.wait_for", short_session_timeout)
+    async def run():
+        factory = Factory()
+        client = LinptechClient(device(), connection_factory=factory)
+        await client.connect()
+        session = client._session
+        original = session.close
+        async def stalled_close():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await original()
+        session.close = stalled_close
+        await client.aclose()
+        assert session.cipher is None and session._token == b"" and not factory.peers[0].callbacks
+        diagnostic = client.diagnostics()
+        assert diagnostic["connection_cleanup"] == {"status": "timeout", "error_type": "TimeoutError"}
+        assert diagnostic["cleanup_steps"]["session"]["status"] == "timeout"
+        assert diagnostic["cleanup_steps"]["connection"]["status"] == "closed"
+        async with LinptechClient(device(), connection_factory=Factory()):
+            pass
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["error", "cancel"])
+def test_session_cleanup_failure_preserves_the_primary_wire_failure_or_cancellation(mode):
+    async def run():
+        factory = Factory(lambda: Peer(ignore_get=mode == "cancel"))
+        client = LinptechClient(device(), connection_factory=factory)
+        await client.connect()
+        session = client._session
+        original = session.close
+        async def failing_close():
+            await original()
+            raise OSError(PRIVATE)
+        session.close = failing_close
+        if mode == "cancel":
+            reading = asyncio.create_task(client.read("sensitivity_level", subscribe=False))
+            await until(lambda: any(request[4] == 1 for request in factory.peers[0].requests))
+            reading.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reading
+        else:
+            async def failing_write(*_, **__):
+                raise RuntimeError(PRIVATE)
+            factory.peers[0].write_gatt_char = failing_write
+            with pytest.raises(ClientError) as error:
+                await client.read("sensitivity_level", subscribe=False)
+            assert error.value.code == "connection_failed" and PRIVATE not in str(error.value)
+        assert session.cipher is None and session._token == b"" and not factory.peers[0].callbacks
+        diagnostic = client.diagnostics()
+        assert diagnostic["connection_cleanup"] == {"status": "error", "error_type": "OSError"}
+        assert diagnostic["cleanup_steps"]["connection"]["status"] == "closed"
+        assert PRIVATE not in json.dumps(diagnostic)
+        async with LinptechClient(device(), connection_factory=Factory()):
+            pass
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["entry", "auth"])
+def test_external_close_during_connect_never_waits_for_the_callers_finally(stage):
+    async def run():
+        entered, partial_cleaned, owner_cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        class Opening:
+            async def __aenter__(self):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    partial_cleaned.set()
+            async def __aexit__(self, *_):
+                pytest.fail("A failed custom entry owns its partial cleanup")
+        class Authenticating(Peer):
+            async def start_notify(self, uuid, callback):
+                await super().start_notify(uuid, callback)
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    partial_cleaned.set()
+        factory = Factory(Authenticating) if stage == "auth" else lambda *_: Opening()
+        client = LinptechClient(device(), connection_factory=factory)
+        async def owner():
+            try:
+                await client.connect()
+            finally:
+                # A bounded assertion also makes the old deadlock reproducible
+                # without leaving asyncio.run() stuck cancelling cyclic tasks.
+                cleanup = asyncio.create_task(client.aclose())
+                done, _ = await asyncio.wait((cleanup,), timeout=1)
+                assert done, "External close waited for its caller's finally block"
+                await cleanup
+                owner_cleaned.set()
+        caller = asyncio.create_task(owner())
+        await entered.wait()
+        await asyncio.wait_for(client.aclose(), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert partial_cleaned.is_set() and owner_cleaned.is_set() and not client.connected
+        if stage == "auth":
+            assert factory.exits[0]["callbacks"] == []
+        async with LinptechClient(device(), connection_factory=Factory()):
+            pass
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("error_type", [RuntimeError, DirectError, TransportError])
 def test_factory_entry_errors_are_sanitized_without_exiting_an_unentered_context(error_type):
     calls = []

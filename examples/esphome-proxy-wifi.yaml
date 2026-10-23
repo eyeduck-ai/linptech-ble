@@ -1,0 +1,34 @@
+# Original ESP32 / ESP32-WROOM-32 development board, not ESP32-S2.
+# Put wifi_ssid, wifi_password, proxy_api_key and proxy_ota_password
+# in a secrets.yaml next to this file before validating / flashing.
+# Source: https://esphome.io/components/bluetooth_proxy/
+esphome:
+  name: linptech-proxy-room
+  friendly_name: Linptech Room Bluetooth Proxy
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+
+api:
+  encryption:
+    key: !secret proxy_api_key
+
+ota:
+  - platform: esphome
+    password: !secret proxy_ota_password
+
+# Keep the default scan timing; aggressive interval/window settings can
+# interfere with Wi-Fi. GATT proxying and active scanning are separate.
+esp32_ble_tracker:
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 3

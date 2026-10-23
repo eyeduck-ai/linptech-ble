@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77.0.3,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linptech-ble"
+version = "0.3.0"
+description = "Model-scoped Linptech MiBeacon decoding and authenticated BLE clients"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.11"
+dependencies = ["bleak>=3.0.2,<3.1", "xiaomi-ble>=1.17.0,<1.18", "cryptography>=50.0.2,<51"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "build>=1.2,<2", "wheel>=0.45,<1", "jsonschema>=4,<5"]
+dashboard = []
+proxy = ["bleak-esphome>=4.1.0,<4.2", "aioesphomeapi>=46.21.0,<46.22"]
+ha = ["paho-mqtt>=2.1.0,<2.2"]
+bridge = ["bleak-esphome>=4.1.0,<4.2", "aioesphomeapi>=46.21.0,<46.22", "paho-mqtt>=2.1.0,<2.2"]
+
+[project.scripts]
+linptech-ble = "linptech_ble.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["linptech_ble*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+linptech_ble = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "specs/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

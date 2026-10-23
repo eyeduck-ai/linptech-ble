@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>感測現場 · Linptech 即時監控</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳至監控內容</a>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Linptech 監控首頁"><img src="/icon.svg" width="34" height="34" alt=""><span>linptech<span class="brand-sub">LOCAL SENSOR MONITOR</span></span></a>
+    <div class="header-tools"><span class="local-label">WINDOWS / BLUETOOTH LE</span><button id="help-button" class="button quiet">測試操作 <span aria-hidden="true">↗</span></button><a class="button export" href="/api/export" download="linptech-session.json">匯出紀錄 <span aria-hidden="true">↓</span></a></div>
+  </header>
+  <main id="main" tabindex="-1">
+    <section class="intro">
+      <div><p class="eyebrow">THE LOCAL OBSERVATORY <span class="tiny-rule"></span> 感知日常</p><h1>感測現場<span class="title-dot">.</span></h1><p class="intro-copy">存在、開合、溫濕度。掌握空間裡的每一次變化。</p></div>
+      <div class="clock-block"><p id="today">—</p><time id="clock">—:—:—</time><span>TAIPEI · UTC+08:00</span></div>
+    </section>
+    <div class="connection-bar"><div class="connection-label"><span id="connection-dot" class="dot pending"></span><strong id="connection-text">正在連接本機監控台</strong><span id="mode-label">僅限本機</span></div><button id="pause-button" class="pause" aria-pressed="false">暫停畫面 <span aria-hidden="true">Ⅱ</span></button></div>
+    <p id="notice" class="notice" role="status" hidden></p>
+    <p id="bridge-status" class="data-note" role="status" hidden></p>
+    <div class="stats" aria-label="本次接收統計">
+      <div><span>已設定裝置</span><strong id="total-devices">—</strong><small>DEVICES</small></div>
+      <div><span>本次解密驗證</span><strong id="verified-devices">—</strong><small>VERIFIED</small></div>
+      <div><span>接收廣播</span><strong id="packet-count">—</strong><small>PACKETS</small></div>
+      <div><span>狀態與事件</span><strong id="event-count">—</strong><small>UPDATES</small></div>
+    </div>
+    <div class="workspace">
+      <section class="sensor-section">
+        <div class="section-heading"><h2>裝置總覽</h2><span>01 — SENSOR OVERVIEW</span></div>
+        <div id="sensor-grid" class="sensor-grid"><p class="empty">正在載入已設定的感測器…</p></div>
+        <p class="data-note"><span aria-hidden="true">◷</span> 顯示各欄位最後收到的值。電量依裝置上報更新，未收到時顯示「尚未上報」。存在／移動狀態超過本機標示門檻（預設 3 分鐘）未回報時顯示「未確認」，不會自行推定無人。RSSI 是電腦接收的訊號強度。</p>
+      </section>
+      <section class="activity-section">
+        <div class="section-heading"><h2>即時紀錄</h2><span id="feed-count">02 — ACTIVITY</span></div>
+        <div class="activity-panel">
+          <div id="device-filters" class="filters" aria-label="依裝置篩選紀錄"><button data-filter="all" aria-pressed="true">全部</button><button data-filter="ES5BB" aria-pressed="false">ES5</button><button data-filter="MS1BB" aria-pressed="false">MS1</button><button data-filter="KS2BB" aria-pressed="false">KS2</button><button data-filter="HS3BB" aria-pressed="false">HS3</button></div>
+          <div class="feed-options"><label for="event-kind">事件類型</label><select id="event-kind"><option value="all">所有紀錄</option><option value="state">狀態變化</option><option value="button">按鍵事件</option><option value="device">其他裝置事件</option><option value="measurement">數值更新</option><option value="error">接收異常</option></select></div>
+          <ol id="event-feed" class="event-feed"><li class="empty">等待第一筆廣播。<br>可從「測試操作」查看觸發方式。</li></ol>
+          <div class="feed-footer"><span class="dot small"></span><span>重複廣播不重複列出事件</span><span id="feed-retained">0 / 300</span></div>
+        </div>
+      </section>
+    </div>
+    <section id="direct-section" class="direct-section" aria-labelledby="direct-title">
+      <div class="section-heading"><div class="trend-title"><h2 id="direct-title">ES5BB 直連工作台</h2><span class="subtle">實驗性功能</span></div><span>03 — RADAR / DIRECT BLE</span></div>
+      <div class="direct-panel">
+        <div class="direct-toolbar"><div><span id="direct-dot" class="dot pending"></span><strong id="direct-status">尚未連線</strong><span id="direct-auth" class="subtle">等待本機程式</span></div><div class="direct-actions"><button id="direct-connect" class="button export" disabled>連接 ES5BB</button><button id="direct-refresh" class="button" disabled>重新讀取</button><button id="direct-disconnect" class="button quiet" disabled>中斷直連</button></div></div>
+        <p id="direct-guide" class="direct-guide">將 ES5BB 放近電腦，離開手機米家的裝置頁並暫時關閉手機藍牙；iPhone 請從「設定 → 藍牙」關閉。按「連接 ES5BB」後立即單擊感測器實體按鍵，保持供電；請勿長按重設。</p>
+        <p id="direct-message" class="direct-message" role="status">這個韌體的直連仍待實機驗證；只有成功讀取的屬性才能調整。</p>
+        <form id="stream-settings" class="stream-settings"><label for="stream-mode">即時訊號</label><select id="stream-mode" name="mode"><option value="radar">雷達距離與能量</option><option value="pir">PIR 紅外線能量</option><option value="off">停止能量串流</option></select><button id="stream-apply" class="button" type="submit" disabled>切換串流</button><span id="stream-status" class="subtle" role="status">等待直連</span></form>
+        <dl class="direct-summary"><div><dt>無人判定時間</dt><dd id="direct-timeout">尚未讀取</dd></div><div><dt>裝置韌體</dt><dd id="direct-firmware">尚未讀取</dd></div><div><dt>最近操作</dt><dd id="direct-operation">—</dd></div></dl>
+        <div class="direct-layout">
+          <div class="radar-readings">
+            <div class="energy-grid"><figure><h3>雷達 · 觸發有人能量</h3><svg id="motion-energy-chart" viewBox="0 0 420 150" role="img" aria-label="觸發有人能量，尚無資料"></svg><figcaption id="motion-energy-caption">等待直連資料</figcaption></figure><figure><h3>雷達 · 維持有人能量</h3><svg id="presence-energy-chart" viewBox="0 0 420 150" role="img" aria-label="維持有人能量，尚無資料"></svg><figcaption id="presence-energy-caption">等待直連資料</figcaption></figure></div>
+            <div class="signal-readings"><div><h3>紅外線 PIR</h3><p id="direct-pir" class="signal-value">尚未取得</p><p id="direct-pir-caption" class="direct-note">直連後顯示整體觸發狀態</p></div><div><h3>ES5BB 供電模式</h3><p id="direct-power" class="signal-value">尚未讀取</p><p id="direct-power-caption" class="direct-note">供電模式與電池百分比分別顯示</p></div></div>
+            <figure class="pir-energy"><h3>PIR 紅外線能量 <span id="pir-energy-value">尚未取得</span></h3><svg id="pir-energy-chart" viewBox="0 0 420 150" role="img" aria-label="PIR 能量，尚無資料"></svg><figcaption id="pir-energy-caption">選擇 PIR 串流後接收；這是整體原始值，沒有逐距離數值。</figcaption></figure>
+            <div class="region-readings"><div><h3>即時距離區段</h3><p id="direct-region">尚未取得雷達感應區段資料</p></div><div><h3>雷達底噪品質</h3><p id="direct-bitmap">尚未取得感應結果資料</p></div></div>
+            <p class="direct-note">雷達分為 32 格，每格 0.25 公尺，最遠 8 公尺。綠柱為能量、紅柱為超過閾值，金線為閾值。能量是裝置原始值 0–255，並非 dBm。紅外線提供整體觸發狀態，沒有逐距離數值；區段回波不代表人數或精確位置。</p>
+            <details class="radar-detail"><summary>逐距離訊號明細（32 格）</summary><p id="radar-detail-age" class="direct-note">等待直連資料</p><div class="radar-table-wrap" tabindex="0" role="region" aria-label="逐距離雷達數值，可捲動"><table class="radar-table"><caption>每格 0.25 公尺；兩種雷達能量及閾值範圍均為 0–255。橫向捲動可查看全部欄位。</caption><thead><tr><th scope="col">距離（m）</th><th scope="col">觸發能量 / 閾值</th><th scope="col">維持能量 / 閾值</th><th scope="col">感應範圍</th><th scope="col">區段回報</th></tr></thead><tbody id="radar-bin-values"></tbody></table></div></details>
+            <form id="zone-settings" class="zone-settings">
+              <div class="zone-heading"><h3>區段設定</h3><label for="zone-kind" class="visually-hidden">區段用途</label><select id="zone-kind"><option value="detect_region">雷達感應範圍</option><option value="interest_region">近距關注範圍</option></select></div>
+              <p id="zone-help" class="direct-note">勾選要使用的區段。紅點代表裝置最近回報該區段有人；近距關注範圍另需在感應設定啟用。</p>
+              <fieldset id="zone-grid" class="zone-grid" aria-describedby="zone-help"><legend class="visually-hidden">距離區段，每格 0.25 公尺</legend></fieldset>
+              <div class="zone-footer"><span id="zone-summary" class="subtle">等待區段讀值</span><button id="zone-reset" type="button" class="button quiet" disabled>還原畫面選擇</button><button id="zone-apply" type="submit" class="button" disabled>套用區段</button></div>
+            </form>
+          </div>
+          <form id="direct-settings" class="direct-settings">
+            <h3>感應設定</h3><label for="direct-property">設定項目</label><select id="direct-property"><option value="sensitivity_level">整體靈敏度</option></select>
+            <p id="direct-current" class="direct-current">裝置目前值：尚未讀取</p>
+            <label id="direct-value-label" for="direct-value">新設定值（必填）</label><div id="direct-value-slot"><input id="direct-value" type="number" disabled required></div>
+            <p id="direct-value-error" class="field-error" hidden>⚠ 請輸入有效範圍內的整數。</p>
+            <button id="direct-apply" type="submit" class="button export" disabled>套用並回讀確認</button>
+            <p class="direct-note">連線會啟動即時能量回報。感應設定在按下套用後才更改；回讀一致後才標示完成。</p>
+          </form>
+        </div>
+        <div class="calibration-row">
+          <div class="calibration-copy"><h3>環境校正</h3><p>請先把 ES5BB 固定在實際安裝位置，維持原本的家具與風扇狀態，校正時離開整個感應範圍。開始後有 10 秒離開時間。</p>
+            <label class="calibration-check"><input id="calibration-empty" type="checkbox">已固定感測器，並準備離開感應範圍</label>
+            <p id="calibration-reason" role="status">連線並取得即時能量後可開始。</p><progress id="calibration-progress" max="30" value="0" aria-label="空房能量收集進度" hidden></progress>
+            <details id="calibration-preview" hidden><summary>檢視建議閾值</summary><p class="direct-note">每格取空房最高能量加 6，且不低於原閾值。這是本機保守掃描流程；提高閾值可能降低微動偵測能力。</p><div class="threshold-table-wrap"><table class="threshold-table"><thead><tr><th>距離</th><th>觸發：原 → 建議</th><th>維持：原 → 建議</th></tr></thead><tbody id="calibration-thresholds"></tbody></table></div></details>
+          </div>
+          <div class="calibration-actions"><button id="calibration-radar" type="button" class="button" disabled>雷達重新校正</button><button id="calibration-start" type="button" class="button" disabled>空房閾值掃描</button><button id="calibration-apply" type="button" class="button export" disabled hidden>套用建議閾值</button><button id="calibration-cancel" type="button" class="button quiet" disabled hidden>取消校正</button><button id="calibration-restore" type="button" class="button" disabled hidden>還原閾值備份</button></div>
+        </div>
+        <details class="direct-details"><summary>查看屬性讀值與連線診斷</summary><dl id="direct-properties" class="property-list"></dl><ol id="direct-diagnostics" class="direct-diagnostics"><li>尚無連線紀錄</li></ol></details>
+      </div>
+    </section>
+    <section class="direct-section" aria-labelledby="sensor-settings-title">
+      <div class="section-heading"><h2 id="sensor-settings-title">其他感測器設定</h2><span>04 — DEVICE SETTINGS</span></div>
+      <div class="direct-panel">
+        <div class="stream-settings"><label for="sensor-model">感測器</label><select id="sensor-model"><option value="KS2BB">KS2BB 按鍵與溫濕度</option><option value="HS3BB">HS3BB 人體移動</option><option value="MS1BB">MS1BB 門窗</option></select><button id="sensor-connect" class="button export" disabled>連線讀取</button><button id="sensor-refresh" class="button" disabled>重新讀取</button><button id="sensor-disconnect" class="button quiet" disabled>中斷</button></div>
+        <p id="sensor-settings-status" class="direct-message" role="status">等待本機程式</p>
+        <p id="sensor-settings-note" class="direct-guide">使用已保存的直連憑證；首次連線需驗證韌體相容性。</p>
+        <form id="sensor-settings-form" class="sensor-settings-form"><label for="sensor-property">設定項目</label><select id="sensor-property" name="property"></select><p id="sensor-current" class="direct-current">尚未讀取</p><label for="sensor-value">新設定值</label><div id="sensor-value-slot"><input id="sensor-value" name="value" type="number" disabled required></div><button id="sensor-apply" type="submit" class="button export" disabled>套用並回讀確認</button></form>
+        <dl id="sensor-properties" class="property-list sensor-properties"></dl>
+      </div>
+    </section>
+    <details id="decode-details" class="direct-details decode-details"><summary>四款廣播解析明細</summary><p class="direct-note">顯示各物件最後收到的資料與解析狀態。未知值不推算成有人或無人；尚未收到不等於裝置不支援。</p><div id="decode-objects"></div></details>
+    <section class="trend-section">
+      <div class="section-heading"><div class="trend-title"><h2>溫濕度軌跡</h2><span class="subtle">KS2BB</span></div><span>04 — SESSION TREND</span></div>
+      <div class="trend-panel"><div class="trend-metrics"><div><span>最新溫度</span><strong id="trend-temp">—<small> °C</small></strong></div><div><span>最新濕度</span><strong id="trend-humidity">—<small> %</small></strong></div><p>本次接收的溫度變化<br><span id="trend-range">等待 KS2BB 溫度廣播</span></p></div><figure><svg id="trend-chart" viewBox="0 0 800 140" role="img" aria-label="本次溫度趨勢，尚無資料"></svg><figcaption id="trend-caption">收到實際溫度資料後繪製；不補值、不推算。</figcaption></figure></div>
+    </section>
+    <footer><span>LINPTECH / 本機藍牙監控</span><span id="recording-info">紀錄保存在專案 captures 資料夾</span><span>所有時間均為台北時間</span></footer>
+  </main>
+  <dialog id="help-dialog" aria-labelledby="help-title">
+    <div class="dialog-heading"><div><p class="eyebrow">A QUICK FIELD GUIDE</p><h2 id="help-title">讓感測器動起來</h2></div><button id="close-help" class="button quiet" autofocus>關閉 <span aria-hidden="true">×</span></button></div>
+    <p>開啟 Windows 藍牙，將裝置放近電腦，先離開手機米家的裝置控制頁，再依下列方式操作。</p>
+    <ol class="guide-list"><li><strong>ES5BB · 人體存在</strong><p>確認供電，單擊實體按鍵喚醒。在正前方約 1～2 公尺走動 5～10 秒，再停留約 30 秒；離開偵測範圍後，等待裝置設定的無人判定延遲。</p></li><li><strong>MS1BB · 門窗</strong><p>將磁鐵靠近與移開感測器數次，觀察「關閉／開啟」與事件紀錄。</p></li><li><strong>KS2BB · 按鍵與溫濕度</strong><p>分別單擊、雙擊、長按功能鍵。輕握外殼約 1 分鐘，再放回桌面等待溫度更新；按鍵不保證會立即觸發溫濕度廣播。</p></li><li><strong>HS3BB · 移動與照度</strong><p>在感測器前走動，再離開並等候裝置自行回報靜止；可改變環境亮度測試照度。</p></li></ol>
+    <div class="advanced-note"><h3>ES5BB 的無人狀態、距離與校正</h3><p>「有人」必須等感測器回報「無人」才會切換；離開範圍後還要等待裝置的無人判定延遲，可在直連工作台查閱及調整。本機的 3 分鐘只用來標示存在狀態過舊，並不是感測器的無人延遲。</p><p>距離以 0.25 公尺區段顯示。連線會開啟即時能量回報；雷達重新校正沒有完成旗標，請以後續底噪及有人／無人測試驗證。空房閾值掃描會先預覽、再套用與回讀。RSSI 是感測器到電腦的訊號強度。</p></div>
+    <p class="subtle">暫停畫面只凍結顯示，後台持續接收。要結束監聽，請在啟動程式的 PowerShell 按 Ctrl+C。</p>
+  </dialog>
+  <div id="announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
+  <noscript><p class="notice">請啟用 JavaScript，才能顯示即時感測資料。</p></noscript>
+</body>
+</html>

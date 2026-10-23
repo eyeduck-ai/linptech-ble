@@ -1,0 +1,39 @@
+# Only for Olimex ESP32-PoE-ISO / ESP32-PoE-ISO-EA (original ESP32).
+# Do not reuse these LAN8720 pins for WT32-ETH01, W5500 or another board.
+# Put proxy_api_key and proxy_ota_password in the adjacent secrets.yaml.
+# Verified against the official example:
+# https://esphome.io/components/bluetooth_proxy/
+esphome:
+  name: linptech-proxy-room
+  friendly_name: Linptech Room Ethernet Bluetooth Proxy
+
+esp32:
+  board: esp32-poe-iso
+  framework:
+    type: esp-idf
+
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk:
+    mode: CLK_OUT
+    pin: GPIO17
+  phy_addr: 0
+  power_pin: GPIO12
+
+logger:
+
+api:
+  encryption:
+    key: !secret proxy_api_key
+
+ota:
+  - platform: esphome
+    password: !secret proxy_ota_password
+
+esp32_ble_tracker:
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 3

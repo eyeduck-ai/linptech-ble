@@ -1271,11 +1271,9 @@ function renderConnection() {
   $("connection-dot").className = `dot${!connected || status === "error" ? " error" : (status !== "listening" ? " pending" : "")}`;
   const viaProxy = latest?.transport?.backend === "esphome";
   $("mode-label").textContent = latest?.mode === "replay" ? "歷史資料 · 非即時感測" : (viaProxy ? "ESPHome 網路代理 · 無需小米網關" : "本機藍牙 · 無需小米網關");
-  const mqtt = latest?.mqtt;
-  const mqttStatus = { connecting: "連線中", connected: "已連線", reconnecting: "重連中", error: "連線異常", stopped: "已停止" }[mqtt?.status] || "等待連線";
-  const bridgeText = [viaProxy ? `接收代理：${latest.transport.proxy_names?.join("、") || "等待設定"} · ES5BB 直連：${latest.transport.gatt_proxy || "請指定代理"}` : "本機藍牙接收", `HA MQTT：${mqtt?.enabled ? mqttStatus : "未啟用"}`].join(" ｜ ");
-  $("bridge-status").hidden = !viaProxy && !mqtt?.enabled;
-  setText("bridge-status", `${!connected ? "主機連線中斷 · 最後設定：" : ""}${bridgeText}${mqtt?.error ? ` · ${mqtt.error}` : ""}`);
+  const receiverText = viaProxy ? `接收代理：${latest.transport.proxy_names?.join("、") || "等待設定"} · 直連代理：${latest.transport.gatt_proxy || "尚未指定"}` : "本機藍牙接收";
+  $("transport-status").hidden = !viaProxy;
+  setText("transport-status", `${!connected ? "主機連線中斷 · 最後設定：" : ""}${receiverText}`);
   const message = !connected ? "網頁與本機程式的連線中斷；畫面保留最後收到的資料，連線恢復後會自動同步。" : (latest?.scanner.error || (paused ? "畫面已暫停；後台持續接收並保存廣播。按「繼續顯示」即可同步最新狀態。" : (latest?.mode === "replay" ? "這是歷史廣播的離線重播，時間與數值不代表裝置目前狀態。" : "")));
   $("notice").textContent = message; $("notice").hidden = !message;
   $("notice").className = `notice${!connected || status === "error" ? " error" : ""}`;

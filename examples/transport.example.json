@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "bluetooth": {
+    "backend": "esphome",
+    "proxies": [
+      {
+        "name": "bedroom",
+        "host": "192.0.2.10",
+        "port": 6053,
+        "noise_psk": "REPLACE_WITH_THIS_PROXY_API_KEY_BASE64"
+      }
+    ],
+    "gatt_proxy": "bedroom",
+    "connect_timeout": 15
+  },
+  "es5": {
+    "auto_connect": false,
+    "retry_seconds": 30
+  }
+}

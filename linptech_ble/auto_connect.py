@@ -24,7 +24,7 @@ class AutoConnector:
         state = self.controller.snapshot()
         if not state.get("token_configured") or state.get("authenticated") or state.get("busy"):
             return
-        # A deliberate UI/MQTT disconnect suspends auto-connect until the next
+        # A deliberate disconnect suspends auto-connect until the next
         # explicit connect (or a service restart). Never fight the user's action.
         if (state.get("last_operation") or {}).get("action") == "disconnect":
             return

@@ -18,4 +18,4 @@ The observations came from separate scan windows, not a continuous recording of 
 4. Supply that device's **12-byte Standard Auth token**, not its advertisement bindkey.
 5. For writes, independently confirm `miot_model="linp.motion.hs1bb2"`. Read before writing, verify readback and close normally.
 
-The library does not wake the hardware remotely or retry indefinitely. ESPHome extends range; it does not keep a sleeping sensor connectable. See [device capabilities](DEVICE_CAPABILITIES.md) and [hardware validation](HARDWARE_VALIDATION_2026-10-23.md).
+The library does not wake the hardware remotely or retry indefinitely. ESPHome extends range; it does not keep a sleeping sensor connectable. See [device capabilities](DEVICE_CAPABILITIES.md) and [hardware validation](HARDWARE_VALIDATION.md).

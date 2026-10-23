@@ -78,4 +78,4 @@ Higher thresholds may reduce sensitivity to small movements. The current round d
 
 An acknowledgement without fresh samples is not a working data stream. Check the per-field timestamps and diagnostics before changing settings. Move closer, release other clients and short-press to wake the sensor. Windows may need one discovery pass to populate its device cache; the transport performs one bounded fallback only for a device-not-found error.
 
-Keep `captures/`, credentials and full diagnostic recordings private. For protocol details and validation boundaries, see [direct protocol](DIRECT_PROTOCOL.md), [hardware tests](HARDWARE_VALIDATION_2026-10-23.md) and [device capabilities](DEVICE_CAPABILITIES.md). ESPHome transport has protocol tests, but has not yet been validated with a physical proxy in this project.
+Keep `captures/`, credentials and full diagnostic recordings private. For protocol details and validation boundaries, see [direct protocol](DIRECT_PROTOCOL.md), [hardware tests](HARDWARE_VALIDATION.md) and [device capabilities](DEVICE_CAPABILITIES.md). ESPHome transport has protocol tests, but has not yet been validated with a physical proxy in this project.

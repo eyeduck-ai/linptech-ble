@@ -1,7 +1,7 @@
 """Linptech MiBeacon decoding and explicit authenticated BLE clients.
 
 Importing this package does not scan, connect, load a config file, start a
-thread, install a Bluetooth manager, or import the optional dashboard/bridge.
+thread, install a Bluetooth manager, or import the optional dashboard.
 Public objects are imported lazily when explicitly requested.
 """
 from importlib import import_module

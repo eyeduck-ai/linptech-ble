@@ -13,6 +13,10 @@ import pytest
 
 CANARY = "SENSITIVE_PACKAGE_CANARY_never_include"
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_EXAMPLE_CONFIGS = ("transport.example.json", "esphome-proxy-wifi.yaml", "esphome-proxy-ethernet.yaml")
+PUBLIC_DOCS = ("README.md", "VALIDATION.md", "LIBRARY.md", "DEVICE_CAPABILITIES.md", "DIRECT_PROTOCOL.md",
+    "DEVTOOLS.md", "DASHBOARD_WINDOWS.md", "SIGNAL_QUALITY.md", "ESPHOME_PROXY.md", "BINDKEY_WINDOWS.md",
+    "ES5BB_ADVANCED.md", "HARDWARE_VALIDATION.md", "CAPABILITY_API.md", "PIR_INVESTIGATION.md", "HS3BB_WAKE.md")
 
 
 @pytest.fixture(scope="module")
@@ -28,8 +32,10 @@ def distributions(tmp_path_factory):
         (source / directory).mkdir()
         for path in (ROOT / directory).glob(pattern):
             shutil.copy2(path, source / directory / path.name)
-    for relative in ("sensors.local.json", "bridge.local.json", ".private/export.secrets.json", "captures/private.raw.jsonl",
-                     "tests/fixtures/private.secret", ".tools/vendor.js", "specs/local-device.json"):
+    for name in ("README.md", *PUBLIC_EXAMPLE_CONFIGS):
+        shutil.copy2(ROOT / "examples" / name, source / "examples" / name)
+    for relative in ("sensors.local.json", "transport.local.json", "bridge.local.json", ".private/export.secrets.json", "captures/private.raw.jsonl",
+                     "tests/fixtures/private.secret", ".tools/vendor.js", "specs/local-device.json", "examples/bridge.example.json"):
         destination = source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(CANARY, encoding="utf-8")
@@ -53,12 +59,16 @@ def test_wheel_and_sdist_exclude_all_private_canaries_and_keep_required_resource
                        or name.endswith((".local.json", ".secrets.json", ".pyc")) for name in files)
         assert "linptech_ble/decoder.py" in files and "linptech_ble/client.py" in files
         assert "linptech_ble/adapters.py" in files and "linptech_ble/web/index.html" in files
+        assert "linptech_ble/transport_config.py" in files
+        assert "linptech_ble/ha_mqtt.py" not in files and "linptech_ble/bridge_config.py" not in files
         assert any(name.startswith("linptech_ble/specs/") and name.endswith(".json") for name in files)
-    assert "docs/LIBRARY.md" in source_data and "examples/library_direct.py" in source_data
-    assert "CONTRIBUTING.md" in source_data and "docs/README.md" in source_data
-    assert "docs/VALIDATION.md" in source_data
-    for name in ("CAPABILITY_API.md", "PIR_INVESTIGATION.md", "HS3BB_WAKE.md"):
-        assert f"docs/{name}" in source_data
+    assert "examples/library_direct.py" in source_data and "CONTRIBUTING.md" in source_data
+    for name in PUBLIC_DOCS:
+        assert source_data[f"docs/{name}"] == (ROOT / "docs" / name).read_bytes()
+    assert "examples/README.md" in source_data
+    for name in PUBLIC_EXAMPLE_CONFIGS:
+        assert source_data[f"examples/{name}"] == (ROOT / "examples" / name).read_bytes()
+    assert "examples/bridge.example.json" not in source_data
     assert any(name.endswith("/licenses/LICENSE") for name in wheel_names)
     assert any(name.endswith("/licenses/THIRD_PARTY_NOTICES.md") for name in wheel_names)
 
@@ -69,13 +79,17 @@ def test_distribution_metadata_has_version_license_bounded_core_and_independent_
         metadata = Parser().parsestr(archive.read(next(n for n in archive.namelist() if n.endswith("/METADATA"))).decode())
     assert metadata["Name"] == "linptech-ble" and metadata["Version"] == "0.4.0"
     assert metadata["License-Expression"] == "MIT"
-    assert set(metadata.get_all("Provides-Extra")) >= {"proxy", "ha", "dashboard", "test"}
+    extras = set(metadata.get_all("Provides-Extra"))
+    assert extras >= {"proxy", "cloud", "dashboard", "test"}
+    assert not extras & {"ha", "bridge", "mqtt"}
     from packaging.requirements import Requirement
     requirements = [Requirement(value) for value in metadata.get_all("Requires-Dist")]
     core = {item.name: str(item.specifier) for item in requirements if item.marker is None}
     assert set(core) == {"bleak", "xiaomi-ble", "cryptography"}
     assert all("<" in specifier and ">=" in specifier for specifier in core.values())
-    assert all(item.marker is not None for item in requirements if item.name in {"paho-mqtt", "bleak-esphome", "aioesphomeapi"})
+    assert not any(item.name in {"paho-mqtt", "homeassistant"} for item in requirements)
+    proxy = {item.name for item in requirements if item.marker and item.marker.evaluate({"extra": "proxy"})}
+    assert proxy == {"bleak-esphome", "aioesphomeapi"}
 
 
 def test_wheel_imports_without_site_packages_or_application_side_effects(distributions, tmp_path):

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from linptech_ble import dashboard
-from linptech_ble.bridge_config import BridgeConfig
+from linptech_ble.transport_config import TransportConfig
 from linptech_ble.config import DeviceConfig
 from linptech_ble.dashboard import DashboardServer, DashboardState
 from linptech_ble.es5_worker import ProcessDirectController, ProcessSensorController
@@ -118,9 +118,9 @@ def test_gatt_callback_uses_exact_device_address_and_keeps_legacy_callback():
 def test_service_constructs_each_instance_routes_callbacks_and_stops_every_controller(monkeypatch):
     devices = [config(1), config(2), config(3, "KS2BB"), config(4, "KS2BB"), config(5, "HS3BB"), config(6, "MS1BB")]
     controllers, started, stopped, autos, snapshot = [], [], [], [], {}
-    settings = BridgeConfig(es5_auto_connect=True)
+    settings = TransportConfig(es5_auto_connect=True)
     monkeypatch.setattr(dashboard, "load_config", lambda _: devices)
-    monkeypatch.setattr(dashboard, "load_bridge_config", lambda _: settings)
+    monkeypatch.setattr(dashboard, "load_transport_config", lambda _: settings)
 
     class Direct(Controller):
         def __init__(self, *args, **kwargs):

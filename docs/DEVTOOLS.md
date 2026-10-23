@@ -101,7 +101,7 @@ Common decoder statuses: `encrypted_no_key` requires the correct bindkey; `decry
 
 - [Library API](LIBRARY.md): caller-owned `Decoder`, `LinptechClient`, metadata and payload-free diagnostics; no dashboard required.
 - [Examples](../examples/README.md): offline synthetic demo and explicit library clients.
-- [ESPHome / Home Assistant](ESPHOME_HOME_ASSISTANT.md): optional proxy transport and MQTT bridge. They require separate configuration and hardware validation.
+- [ESPHome Bluetooth Proxy](ESPHOME_PROXY.md): optional network transport with separate configuration and hardware validation.
 
 Run synthetic tests without sensors or account credentials:
 

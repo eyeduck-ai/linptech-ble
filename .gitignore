@@ -6,7 +6,6 @@ __pycache__/
 .pytest_tmp*/
 *.egg-info/
 sensors.local.json
-bridge.local.json
 *.local.json
 secrets.yaml
 secrets.yml

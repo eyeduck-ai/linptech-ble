@@ -24,7 +24,7 @@ from test_client import KEY, Radio, add, commands, device, requested, until
 from test_standard_auth import Peer, TOKEN
 
 
-@pytest.mark.parametrize("module", ["es5_direct", "sensor_direct", "es5_worker", "dashboard", "ha_mqtt"])
+@pytest.mark.parametrize("module", ["es5_direct", "sensor_direct", "es5_worker", "dashboard"])
 def test_application_adapters_do_not_own_wire_or_security_implementation(module):
     path = Path(__file__).parents[1] / "linptech_ble" / (module + ".py")
     tree = ast.parse(path.read_text(encoding="utf-8"))

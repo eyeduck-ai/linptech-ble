@@ -24,8 +24,6 @@ test = ["pytest>=8,<10", "build>=1.2,<2", "wheel>=0.45,<1", "jsonschema>=4,<5"]
 dashboard = []
 cloud = ["requests>=2.34.2,<3"]
 proxy = ["bleak-esphome>=4.1.0,<4.2", "aioesphomeapi>=46.21.0,<46.22"]
-ha = ["paho-mqtt>=2.1.0,<2.2"]
-bridge = ["bleak-esphome>=4.1.0,<4.2", "aioesphomeapi>=46.21.0,<46.22", "paho-mqtt>=2.1.0,<2.2"]
 
 [project.scripts]
 linptech-ble = "linptech_ble.cli:main"

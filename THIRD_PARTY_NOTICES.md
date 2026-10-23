@@ -18,7 +18,6 @@ project does not relicense them. They are dependencies, not vendored copies.
 | [cryptography](https://github.com/pyca/cryptography) | 50.0.2 | Apache-2.0 OR BSD-3-Clause | Standard Auth and AES-CCM |
 | [bleak-esphome](https://github.com/Bluetooth-Devices/bleak-esphome) | 4.1.0 | MIT | Optional ESPHome transport |
 | [aioesphomeapi](https://github.com/esphome/aioesphomeapi) | 46.21.0 | MIT | Optional encrypted ESPHome API |
-| [paho-mqtt](https://github.com/eclipse-paho/paho.mqtt.python) | 2.1.0 | EPL-2.0 OR BSD-3-Clause | Optional MQTT bridge |
 | [Requests](https://github.com/psf/requests) | 2.34.2 minimum | Apache-2.0 | Optional explicit Xiaomi Cloud QR credential lookup |
 
 Xiaomi MIoT instance JSON files in `linptech_ble/specs/` are public protocol

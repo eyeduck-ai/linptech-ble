@@ -3,7 +3,7 @@
 Use Python 3.11+ and work from a source checkout:
 
 ```powershell
-python -m pip install -e ".[test,bridge]"
+python -m pip install -e ".[test,proxy,cloud]"
 python -m pytest -q
 python -m build
 ```

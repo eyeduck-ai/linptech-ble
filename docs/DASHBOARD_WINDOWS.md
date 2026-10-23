@@ -35,7 +35,7 @@ Default startup:
 
 - Starts local BLE advertisement reception, decoding and recording under `captures/`.
 - Leaves GATT controllers waiting for a connection request. It does not automatically connect or change sensor settings.
-- Keeps MQTT and ES5 automatic connection disabled. These require an explicit [bridge configuration](ESPHOME_HOME_ASSISTANT.md).
+- Leaves ES5 automatic connection disabled unless explicitly enabled in [transport configuration](ESPHOME_PROXY.md).
 - Binds HTTP to `127.0.0.1` only. It does not expose the dashboard to other LAN devices.
 
 ## Test the sensors
@@ -94,7 +94,7 @@ Windows local GATT retains a separate worker process so blocked native cleanup c
 
 Cancelling threshold application or restoration can leave a partial device change. The Dashboard retains the backup and marks restoration as required until all original values are independently verified; a closed connection is not evidence that settings were untouched.
 
-The refactored route has synthetic encrypted-peer coverage and a physical ES5BB smoke through `LinptechClient`: 32-bin radar and 15 freshly reread, unchanged settings. No persistent settings or calibration were changed; streaming stopped and the session disconnected. KS2BB/HS3BB refactored UI paths and independent PIR energy remain outside this hardware smoke. See [hardware evidence and readback limits](HARDWARE_VALIDATION_2026-10-23.md).
+The refactored route has synthetic encrypted-peer coverage and a physical ES5BB smoke through `LinptechClient`: 32-bin radar and 15 freshly reread, unchanged settings. No persistent settings or calibration were changed; streaming stopped and the session disconnected. KS2BB/HS3BB refactored UI paths and independent PIR energy remain outside this hardware smoke. See [hardware evidence and readback limits](HARDWARE_VALIDATION.md).
 
 ## Offline and proxy modes
 
@@ -104,12 +104,12 @@ For a source checkout, the supplied demo is wholly synthetic and requires no Blu
 .\.venv\Scripts\python.exe -m linptech_ble dashboard --config examples/demo.secrets.json --replay examples/demo.raw.jsonl --port 8766 --open
 ```
 
-Replay preserves recorded timestamps, labels the display as historical, and disables GATT and bridge services. It cannot be combined with `--bridge-config`.
+Replay preserves recorded timestamps, labels the display as historical, and disables GATT and cloud credential setup. It cannot be combined with `--transport-config`.
 
 For a configured ESPHome installation:
 
 ```powershell
-.\.venv\Scripts\python.exe -m linptech_ble dashboard --bridge-config bridge.local.json --open
+.\.venv\Scripts\python.exe -m linptech_ble dashboard --transport-config transport.local.json --open
 ```
 
-Proxy hardware and Home Assistant still need deployment-specific validation. See [ESPHome and Home Assistant](ESPHOME_HOME_ASSISTANT.md).
+Proxy hardware needs deployment-specific validation. See [ESPHome Bluetooth Proxy](ESPHOME_PROXY.md).

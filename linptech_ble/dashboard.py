@@ -25,9 +25,8 @@ from .runtime import capture
 from .es5_direct import DirectController
 from .es5_worker import ProcessDirectController, ProcessSensorController
 from .standard_auth import DirectError
-from .bridge_config import load_bridge_config, public_transport
+from .transport_config import load_transport_config, public_transport
 from .transport import BluetoothConfig
-from .ha_mqtt import HomeAssistantBridge
 from .auto_connect import AutoConnector
 from .dashboard_inventory import DashboardInventory
 
@@ -129,10 +128,9 @@ class DashboardState:
         self.sensor_direct: dict[str, ProcessSensorController] = {}
         self.direct_devices: dict[str, DirectController] = {}
         self.transport = public_transport(BluetoothConfig())
-        self.mqtt: HomeAssistantBridge | None = None
         self.inventory: DashboardInventory | None = None
         # Account sessions and QR data are intentionally absent from snapshots,
-        # SSE, session exports, and MQTT. Only /api/cloud exposes redacted state.
+        # SSE and session exports. Only /api/cloud exposes redacted state.
         self.cloud_credentials: Any = None
         self.devices = {
             device.address: {
@@ -307,7 +305,6 @@ class DashboardState:
                 "sensor_direct": {model: controller.snapshot() for model, controller in self.sensor_direct.items()},
                 "direct_devices": {address: controller.snapshot() for address, controller in self.direct_devices.items()},
                 "transport": dict(self.transport),
-                "mqtt": self.mqtt.status() if self.mqtt else {"enabled": False, "status": "disabled"},
                 "management": {"enabled": self.inventory is not None and self.mode == "live"},
                 "discovery": self.inventory.discovery.snapshot() if self.inventory else {
                     "status": "unavailable", "devices": [], "error": None, "remaining_seconds": 0},
@@ -706,19 +703,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool = False,
                     replay_path: str | Path | None = None, stale_after: float = 180,
-                    bridge_path: str | Path | None = None) -> None:
-    if replay_path is not None and bridge_path is not None:
-        raise ValueError("離線重播不能同時載入 bridge 設定；請移除 --bridge-config，避免歷史事件送到 HA。")
-    bridge = load_bridge_config(bridge_path)
+                    transport_path: str | Path | None = None) -> None:
+    if replay_path is not None and transport_path is not None:
+        raise ValueError("離線重播不使用連線設定；請移除 --transport-config。")
+    settings = load_transport_config(transport_path)
     devices = load_config(config)
     source = Path(replay_path) if replay_path else None
     if source is not None and not source.is_file():
         raise FileNotFoundError("找不到原始廣播重播檔。")
     state = DashboardState(devices, mode="replay" if source else "live", stale_after=stale_after)
-    state.transport = public_transport(bridge.bluetooth)
+    state.transport = public_transport(settings.bluetooth)
     def make_controller(device):
         controller_type = ProcessDirectController if device.model == "ES5BB" else ProcessSensorController
-        controller = controller_type(device, transport=bridge.bluetooth,
+        controller = controller_type(device, transport=settings.bluetooth,
             on_value=lambda record, address=device.address: state.ingest_direct({**record, "address": address}))
         controller.defer_start = True
         return controller
@@ -733,17 +730,17 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
                 state.sensor_direct.setdefault(device.model, controller)
     # Bind before starting BLE so an occupied port cannot leave an orphan scanner.
     server = DashboardServer(state, port)
-    worker = MonitorWorker(state, devices, replay_path=source, transport=bridge.bluetooth)
-    autos = [AutoConnector(controller, retry_seconds=bridge.es5_retry_seconds,
+    worker = MonitorWorker(state, devices, replay_path=source, transport=settings.bluetooth)
+    autos = [AutoConnector(controller, retry_seconds=settings.es5_retry_seconds,
                           ready=lambda: state.scanner_status == "listening",
                           submit=lambda command, controller=controller: state.inventory.submit_auto(controller, command)
                               if state.inventory else None)
              for address, controller in state.direct_devices.items()
-             if state.devices[address]["model"] == "ES5BB" and bridge.es5_auto_connect]
+             if state.devices[address]["model"] == "ES5BB" and settings.es5_auto_connect]
     if source is None:
         def sync_autos():
             wanted = [controller for address, controller in state.direct_devices.items()
-                      if state.devices[address]["model"] == "ES5BB" and bridge.es5_auto_connect]
+                      if state.devices[address]["model"] == "ES5BB" and settings.es5_auto_connect]
             for auto in list(autos):
                 if auto.controller not in wanted:
                     auto.stop()
@@ -751,7 +748,7 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
             existing = {auto.controller for auto in autos}
             for controller in wanted:
                 if controller not in existing:
-                    auto = AutoConnector(controller, retry_seconds=bridge.es5_retry_seconds,
+                    auto = AutoConnector(controller, retry_seconds=settings.es5_retry_seconds,
                         ready=lambda: state.scanner_status == "listening",
                         submit=lambda command, controller=controller: state.inventory.submit_auto(controller, command))
                     autos.append(auto)
@@ -761,25 +758,12 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
             on_controllers_changed=sync_autos)
         from .cloud_credentials import CloudCredentialManager
         state.cloud_credentials = CloudCredentialManager(state.inventory)
-        if bridge.mqtt.enabled:
-            # The bridge supplies its exact advertised address; inventory changes
-            # must never route a queued command to a different first ES5 device.
-            def mqtt_submit(command):
-                with state.inventory.lock:
-                    value = dict(command)
-                    address = value.pop("address", None)
-                    controller = state.direct_controller("ES5BB", address)
-                    if controller is None:
-                        raise DirectError("此 ES5BB 已移除或未啟用直連。")
-                    return controller.submit(value)
-            state.mqtt = HomeAssistantBridge(bridge.mqtt, state.snapshot, mqtt_submit,
-                targeted_submit=lambda address, command: mqtt_submit({**command, "address": address}))
     url = f"http://127.0.0.1:{server.server_address[1]}"
     print(f"即時監控台：{url}\n按 Ctrl+C 停止網頁服務與藍牙監聽。", flush=True)
     if source:
         print("目前為離線重播；畫面保留原始封包時間，不代表現在的感測狀態。", flush=True)
-    elif bridge.bluetooth.backend == "esphome":
-        print("接收來源：ESPHome Bluetooth Proxy；HA 經 MQTT 接收，代理廣播訂閱由本程式負責。", flush=True)
+    elif settings.bluetooth.backend == "esphome":
+        print("接收來源：ESPHome Bluetooth Proxy；廣播與直連共用本程式的代理連線。", flush=True)
     started = False
     try:
         worker.start()
@@ -787,8 +771,6 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
         for address, controller in state.direct_devices.items():
             if state.devices[address]["model"] == "ES5BB" or (controller.catalog and controller.device.auth_token):
                 controller.start()
-        if state.mqtt:
-            state.mqtt.start()
         for auto in autos:
             auto.start()
         if open_browser:
@@ -804,8 +786,6 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
                 pass
         for auto in autos:
             auto.stop()
-        if state.mqtt:
-            state.mqtt.stop()
         for controller in state.direct_devices.values():
             controller.stop()
         if started:

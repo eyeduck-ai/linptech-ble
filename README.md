@@ -2,6 +2,8 @@
 
 Python library for **ES5BB, MS1BB, KS2BB and HS3BB**: decode MiBeacon advertisements and use authenticated GATT on supported models. Works with local BLE or an optional ESPHome Bluetooth Proxy. **No Xiaomi gateway is required.**
 
+Applications choose their own MQTT, Home Assistant or other downstream integration.
+
 **0.4.0 · Python 3.11+ · MIT · experimental API.** The core library takes caller-supplied credentials. Importing the package does not scan, connect, load local configuration or start background threads. The optional Dashboard can provision credentials through an explicit Xiaomi Home QR login.
 
 ## Install
@@ -15,7 +17,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-Optional dependencies: install `.[proxy]` for ESPHome, `.[ha]` for the MQTT bridge, `.[bridge]` for both, or `.[cloud]` for Dashboard QR credential setup. A local wheel can also be installed with pip; this release is not published on PyPI.
+Optional dependencies: install `.[proxy]` for ESPHome or `.[cloud]` for Dashboard QR credential setup. A local wheel can also be installed with pip; this release is not published on PyPI.
 
 ## Decode advertisements
 
@@ -29,7 +31,7 @@ decoder = Decoder([device])
 result = decoder.decode(AdvertisementRecord.from_dict(raw_record))
 ```
 
-`Decoder` performs no Bluetooth or network I/O. Reuse it to suppress recent duplicate events. Existing HA/Bleak-compatible scanner data can be passed through `decode_service_info(info, decoder, timestamp=received_at)`. Missing values remain unknown; encrypted extensions require valid MIC, structure and values.
+`Decoder` performs no Bluetooth or network I/O. Its model-scoped object catalog extends the existing xiaomi-ble helpers. Reuse it to suppress recent duplicate events. Existing HA/Bleak-compatible scanner data can be passed through `decode_service_info(info, decoder, timestamp=received_at)`. Missing values remain unknown; encrypted extensions require valid MIC, structure and values.
 
 ## Connect directly
 
@@ -54,7 +56,7 @@ The async client supports selected reads, bounded updates, ES5BB streams and all
 | KS2BB | Temperature, humidity and button events | Temperature unit and button mode |
 | HS3BB | Motion, illuminance and battery | Selected settings; writes require confirmed MIoT model |
 
-See [device capabilities and evidence](docs/DEVICE_CAPABILITIES.md) for field-level limits. ES5BB's independent **PIR energy has no valid samples** from the tested device; its PIR trigger flag works. A command ACK is not proof of sensor data or completed calibration. HS3BB short-press wake followed by authentication/read was observed on one device. Physical ESPHome and full Home Assistant deployment remain unverified.
+See [device capabilities and evidence](docs/DEVICE_CAPABILITIES.md) for field-level limits. ES5BB's independent **PIR energy has no valid samples** from the tested device; its PIR trigger flag works. A command ACK is not proof of sensor data or completed calibration. HS3BB short-press wake followed by authentication/read was observed on one device. Physical ESPHome transport remains unverified.
 
 ## API and examples
 
@@ -74,6 +76,6 @@ python -m linptech_ble dashboard --open
 
 The Dashboard uses `sensors.local.json` by default and opens `http://127.0.0.1:8765/`. Add devices manually or install `.[cloud]` to choose a region, scan a Xiaomi Home login QR and save credentials for selected supported sensors. Other devices' saved credentials are preserved. Login is optional; monitoring uses local credentials. Advanced controls use the public `LinptechClient`. Replay/demo data is only an interface test. See [Windows Dashboard](docs/DASHBOARD_WINDOWS.md) and [credential setup](docs/BINDKEY_WINDOWS.md).
 
-Home Assistant can use the optional **MQTT Discovery bridge**; this is not a native `custom_components` integration. A proxy dedicated to this bridge must have a single BLE subscription owner: do not simultaneously assign it to HA's native ESPHome Bluetooth integration. See [ESPHome and Home Assistant](docs/ESPHOME_HOME_ASSISTANT.md).
+For network reception and GATT, see [ESPHome Bluetooth Proxy](docs/ESPHOME_PROXY.md). Downstream applications can consume the public decoder, adapters and async client; the Dashboard is one such example.
 
 [Documentation index](docs/README.md) · [Contributing](CONTRIBUTING.md) · [LICENSE](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

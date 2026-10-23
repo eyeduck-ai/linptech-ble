@@ -1,8 +1,8 @@
 # Python library guide
 
-**linptech-ble 0.4.0 · Python 3.11+ · MIT.** Import as `linptech_ble`. Install from this checkout with `python -m pip install -e .`; optional extras are `proxy`, `ha` and `bridge`. See the [README](../README.md) for Windows environment setup.
+**linptech-ble 0.4.0 · Python 3.11+ · MIT.** Import as `linptech_ble`. Install from this checkout with `python -m pip install -e .`; optional extras are `proxy`, `cloud`, `dashboard` and `test`. See the [README](../README.md) for Windows environment setup.
 
-The public API works without the Dashboard, CLI, MQTT or configuration files. Imports, `DeviceConfig`, `Decoder` construction and client construction do not open Bluetooth or load credentials. Supply your own keys; no Xiaomi account or gateway is required at runtime.
+The public API works independently of the Dashboard, CLI and configuration files. Imports, `DeviceConfig`, `Decoder` construction and client construction do not open Bluetooth or load credentials. Supply your own keys; no Xiaomi account or gateway is required at runtime.
 
 ## Decode caller-supplied advertisements
 
@@ -139,7 +139,7 @@ diagnostic = client.diagnostics()
 
 A **write ACK**, a **NULL snapshot** and a **valid op4 property notification** are separate outcomes. Only valid known op4 values increment `valid_op4_updates`; only valid `pir_energy` op4 makes `pir_data_received` true. These counters prove receipt, not freshness. `stream_mode_is_acknowledgement_only` makes the distinction explicit. Fragment counts are not sample counts.
 
-## Optional ESPHome transport and Home Assistant
+## Optional ESPHome transport
 
 ```python
 from linptech_ble import BluetoothConfig, ProxyConfig
@@ -156,13 +156,13 @@ async def read_via_proxy(device):
 
 Replace the documentation IP and supply your own ESPHome API encryption key. Install `.[proxy]`; the proxy needs `active: true` and an available GATT slot. Multiple proxies require `gatt_proxy`. Advertisement and GATT traffic share one Native API connection per proxy. This standalone transport must own the BLE subscription; do not simultaneously assign the same proxy to HA's native Bluetooth integration.
 
-Home Assistant support is an optional MQTT Discovery bridge (`.[ha]`, or `.[bridge]` with proxies), not a native custom integration. It is not required by the public client. See [ESPHome/Home Assistant setup](ESPHOME_HOME_ASSISTANT.md).
+Use these APIs from your own application or downstream integration. Protocol parsing and device access remain in this library; publishing state to another system belongs to the caller. See [ESPHome setup](ESPHOME_PROXY.md).
 
 ## Tested scope and optional tools
 
 Four models' advertisements were authenticated on real devices. Local Windows direct tests covered ES5BB authentication/reads, both KS2BB settings and HS3BB indicator/detection-interval writes, independent readback and restoration. HS3BB short press followed by immediate connection/read worked on one device; confirm your own model and connectable window. Its A/B timeouts returned out-of-spec zero and were not written.
 
-ES5BB radar and PIR trigger flags work; independent PIR energy still has no valid samples. Static specification and command ACK do not establish that channel's availability. Native SDK wire details remain uncertain; permanent firmware non-support is not proven. Physical ESPHome and a full HA deployment remain unverified. See [device comparison](DEVICE_CAPABILITIES.md), [PIR investigation](PIR_INVESTIGATION.md) and [HS3BB wake](HS3BB_WAKE.md).
+ES5BB radar and PIR trigger flags work; independent PIR energy still has no valid samples. Static specification and command ACK do not establish that channel's availability. Native SDK wire details remain uncertain; permanent firmware non-support is not proven. Physical ESPHome transport remains unverified. See [device comparison](DEVICE_CAPABILITIES.md), [PIR investigation](PIR_INVESTIGATION.md) and [HS3BB wake](HS3BB_WAKE.md).
 
 Runnable examples: [decode](../examples/library_decode.py), [direct/diagnostics](../examples/library_direct.py), [proxy](../examples/library_proxy.py). They read credentials from caller-provided environment variables when explicitly executed.
 

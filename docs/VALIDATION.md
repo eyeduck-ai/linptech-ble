@@ -1,26 +1,29 @@
-# Validation overview
+# Validation
 
-Version **0.4.0 passed 682 tests** on Windows on 2026-10-23 (62.59 seconds). This includes public-client integration, encrypted peers, threshold commit guards, cancellation/backup recovery, distribution, per-address controls, receiver-aware RSSI history, GUI inventory/discovery, credential-update transactions, drawer controls, HA inventory synchronization and authenticated notifications arriving before the session-start acknowledgement. The earlier 0.3.0 baseline had 479 tests. See [development tools](DEVTOOLS.md) to rerun the source suite.
+Run the synthetic suite with `python -m pytest -q`; see [contributing](../CONTRIBUTING.md) for test dependencies. Tests use generated credentials and peers. Hardware results apply to the tested devices and firmware.
 
 | Layer | Evidence | Limit |
 | --- | --- | --- |
-| Advertisement decoding | Synthetic AES-CCM fixtures and authenticated captures from all four models | Not every protocol-defined object has been received |
-| Public GATT client | ES5BB, KS2BB and HS3BB authentication and selected reads/writes | Device/firmware-specific; MS1BB has no released settings profile |
-| ES5BB PIR | Trigger flag 0/1 observed; matrix of stream sequences tested | Independent energy still absent; native SDK subscription details unknown |
-| Windows Dashboard | Live advertisements; ES5BB public-client GATT smoke confirmed 32-bin radar, 16 fresh timestamps in 32 seconds and 15 unchanged settings by fresh readback | KS2BB/HS3BB refactored UI paths remain synthetic-only; radar-mode smoke did not validate PIR or settings writes |
-| ESPHome / HA MQTT | Protocol peers, lifecycle tests and synthetic UI | No physical ESP32 or full HA installation yet |
-| Distribution | Core-only wheel upgrade, offline sdist rebuild, source/resource/link audits | Not a cross-platform hardware certification |
+| Advertisement decoding | Synthetic AES-CCM fixtures and authenticated packets from all four models | Not every defined object has been received |
+| Public GATT client | ES5BB, KS2BB and HS3BB authentication and selected reads/writes | Model/firmware-specific; MS1BB has no released settings profile |
+| ES5BB PIR | Trigger flag 0/1 observed; multiple stream sequences tested | Independent energy remains absent |
+| Dashboard | Live advertisements and ES5BB public-client radar; synthetic inventory, QR flow and RSSI views | Refactored KS2BB/HS3BB UI paths remain synthetic-only |
+| QR credential setup | Integrated `cn` login and key save for all four models; live KS2BB packets decrypted afterwards | Other regions and account variants remain unverified |
+| ESPHome | Real `bleak-esphome` backend against a synthetic Native API peer | No physical ESP32 tests |
+| Distribution | Wheel/sdist, resource, dependency and documentation-link checks | No cross-platform hardware certification |
 
-Writes under test were followed by independent readback and restoration. The latest ES5BB matrix verified all 24 valid original settings at exit; HS3BB's wake experiment was read-only. No reset or firmware update was performed.
+## Hardware
 
-The later ES5BB Dashboard smoke used only temporary stream controls, with no persistent setting changes or calibration. Of 17 baseline setting values, 15 were freshly reread unchanged; optional `pir_threshold` and `indicator_light` were not freshly reread. It ended disconnected, with streaming off and no restoration pending. See the [hardware evidence](HARDWARE_VALIDATION_2026-10-23.md).
+All four models produced MIC-authenticated advertisements. KS2BB temperature/humidity and single/double/long press, MS1BB opening/closing and battery, HS3BB motion/illuminance, and ES5BB occupancy/illuminance/near-range/battery were observed across local Windows sessions. A received value proves that report, not a guaranteed reporting interval or sensor accuracy.
 
-The row and signal-survey views were checked in the live browser and an isolated seven-device/two-receiver server. Same-model filters and per-address drafts remain separate; writes to the second ES5BB/KS2BB leave the first unchanged. Receiver selection and CSV exports retain sample provenance. Menu toggles send no command, pause/replay disable editing, and device-list changes preserve controls. These UI checks made no physical setting changes. Live Windows reception supplies the new RSSI histories; physical ESPHome reception remains untested.
+Selected KS2BB and HS3BB settings passed independent readback and restoration. ES5BB tests verified radar streams, PIR trigger flags and occupied/clear transitions. Independent PIR energy, calibration effects and threshold application remain unverified. Tested writes were restored; no reset or firmware update was performed. Details: [hardware evidence](HARDWARE_VALIDATION.md), [PIR investigation](PIR_INVESTIGATION.md), [HS3BB wake](HS3BB_WAKE.md).
 
-The later device-management browser check used a separate synthetic inventory and the real HTTP server. Scan/select, add with credentials, rename with blank credentials, return to the per-device drawer, and confirmed removal completed without restarting. The configured count changed from four to five and back to four. API tests cover redaction, loopback/Origin checks, atomic-save failure, live decoder refresh, active-session guards and explicit HS3BB protocol confirmation. GUI credential changes were confined to the synthetic configuration; the user's device configuration and physical settings were unchanged.
+## Application and transport boundaries
 
-Interleaved-thread tests prevent an old decoder from verifying a replaced key or repopulating a removed/re-added sensor. Opt-in connection retries cannot reconnect retired controllers or deadlock inventory changes. MQTT tests retire removed fields as unavailable, preserve unique IDs on rename, refresh re-added discovery and retry failed availability publications. These HA lifecycle checks use a synthetic broker peer; they are not new physical HA validation.
+Synthetic encrypted peers exercise authentication, typed reads, guarded writes, readback, stream cleanup and early notifications before the session-start acknowledgement. Missing, invalid or stale observations remain unavailable rather than becoming zero or false.
 
-ES5BB field reporting was checked against authenticated historical captures and the released MIoT specification. Lux, close-range occupancy and battery are already supported broadcast objects. Empty/undeclared GATT access is distinguished from missing broadcast observations; no values, reporting intervals or disabled-region state are inferred from silence. The dashboard now shows observation source and time, and the advanced controls open in a right-side dialog without expanding device rows.
+Dashboard checks cover per-address controls, same-model filters, independent drafts, receiver-aware RSSI history, CSV provenance, drawer behavior and pause/replay restrictions. Isolated browser tests scan, add, rename and remove devices without restarting. Credential transactions preserve unselected devices and reject active or concurrently edited targets. Thread tests prevent replaced decoders or retired controllers from restoring obsolete state.
 
-Details: [hardware](HARDWARE_VALIDATION_2026-10-23.md), [ES5BB earlier session](ES5BB_DIRECT_VALIDATION_2026-10-22.md), [PIR](PIR_INVESTIGATION.md), [HS3BB wake](HS3BB_WAKE.md), [proxy simulation](PROXY_HA_VALIDATION_2026-10-22.md).
+The integrated QR flow completed a real `cn` login and saved bindkeys plus compatible direct tokens for all four selected models. Reloaded credentials remained valid; subsequent KS2BB packets passed MIC verification. Synthetic tests separately cover cancellation/expiry, encrypted cloud requests, redacted HTTP boundaries, selection persistence, unselected credential preservation and concurrently edited targets. Result displays distinguish retrieved credentials from preserved values. Account access and sensor credentials are never included in public fixtures.
+
+ESPHome tests exercise shared advertisement/GATT ownership, local/remote routing, partial disconnections and the production authentication protocol. Example firmware was reviewed, not compiled or flashed. Actual radio range, proxy latency and long-term reconnection behavior require physical deployment testing.

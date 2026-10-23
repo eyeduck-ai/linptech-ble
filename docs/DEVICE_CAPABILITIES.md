@@ -56,4 +56,4 @@ Advertising uses a 16-byte bindkey; ES5BB, KS2BB, and HS3BB direct authenticatio
 
 A received advertisement does not guarantee current connectability. Writes require an authenticated session, a valid current read, model and value checks, and independent readback. Unknown, stale, or invalid values never become fabricated zero/false states.
 
-These profiles implement MiBeacon and GATT, not BLE Mesh provisioning or relaying. Local Windows BLE is hardware-tested; [ESPHome proxy and optional HA MQTT](ESPHOME_HOME_ASSISTANT.md) remain simulated at the network-integration level. Detailed evidence is in the [hardware report](HARDWARE_VALIDATION_2026-10-23.md).
+These profiles implement MiBeacon and GATT, not BLE Mesh provisioning or relaying. Local Windows BLE is hardware-tested; [ESPHome transport](ESPHOME_PROXY.md) has synthetic protocol tests and awaits physical deployment validation. Detailed evidence is in the [hardware report](HARDWARE_VALIDATION.md).

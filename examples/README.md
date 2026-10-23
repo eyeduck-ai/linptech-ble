@@ -31,3 +31,7 @@ In a source checkout, `demo.raw.jsonl` and `demo.secrets.json` contain generated
 Replay requires no Bluetooth, cloud or gateway and disables device controls. It demonstrates decoder/application wiring, not hardware compatibility. Regenerate the source-checkout fixtures with `python examples/generate_demo.py`; these generated files are not guaranteed to be included in installed distributions.
 
 See the [library guide](../docs/LIBRARY.md), [credential setup](../docs/BINDKEY_WINDOWS.md) and [dashboard guide](../docs/DASHBOARD_WINDOWS.md) for real-device use.
+
+## Network transport
+
+`transport.example.json` configures BLE reception and optional ES5BB automatic connection for CLI/Dashboard use. Copy it to private `transport.local.json`, fill in the proxy address/API key, and pass `--transport-config transport.local.json`. Sensor keys remain in `sensors.local.json`. See [ESPHome setup and migration](../docs/ESPHOME_PROXY.md).

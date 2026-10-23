@@ -1,4 +1,3 @@
 -r requirements.txt
 bleak-esphome==4.1.0
 aioesphomeapi==46.21.0
-paho-mqtt==2.1.0

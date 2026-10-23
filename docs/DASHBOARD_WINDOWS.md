@@ -55,7 +55,7 @@ Windows local GATT retains a separate worker process so blocked native cleanup c
 
 Cancelling threshold application or restoration can leave a partial device change. The Dashboard retains the backup and marks restoration as required until all original values are independently verified; a closed connection is not evidence that settings were untouched.
 
-The refactored Dashboard route is covered by synthetic encrypted-peer tests. Earlier sensor hardware results still apply to the documented library operations; this UI refactor has not been retested on physical sensors.
+The refactored route has synthetic encrypted-peer coverage and a physical ES5BB smoke through `LinptechClient`: 32-bin radar and 15 freshly reread, unchanged settings. No persistent settings or calibration were changed; streaming stopped and the session disconnected. KS2BB/HS3BB refactored UI paths and independent PIR energy remain outside this hardware smoke. See [hardware evidence and readback limits](HARDWARE_VALIDATION_2026-10-23.md).
 
 ## Offline and proxy modes
 

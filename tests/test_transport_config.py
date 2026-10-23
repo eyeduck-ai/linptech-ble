@@ -101,3 +101,18 @@ def test_capture_cli_requires_dashboard_for_automatic_direct_connections(tmp_pat
 def test_programmatic_transport_options_validate_before_any_connection(options):
     with pytest.raises(ValueError):
         TransportConfig(**options)
+
+
+def test_json_per_address_routes_support_auto_connect_without_a_global_proxy(tmp_path):
+    document = network_config()
+    document["bluetooth"]["proxies"].append({"name": "living", "host": "192.0.2.11"})
+    del document["bluetooth"]["gatt_proxy"]
+    document["bluetooth"]["gatt_routes"] = {"aa:bb:cc:dd:ee:01": "living", "AA:BB:CC:DD:EE:02": "bedroom"}
+    settings = load_transport_config(write(tmp_path, document))
+    assert settings.es5_auto_connect
+    assert settings.bluetooth.direct_proxy("AA:BB:CC:DD:EE:01").name == "living"
+    assert settings.bluetooth.direct_proxy("AA:BB:CC:DD:EE:02").name == "bedroom"
+    public = public_transport(settings.bluetooth)
+    assert public["gatt_proxy"] is None
+    assert public["gatt_routes"] == {"AA:BB:CC:DD:EE:01": "living", "AA:BB:CC:DD:EE:02": "bedroom"}
+    assert API_KEY not in json.dumps(public) and "192.0.2" not in json.dumps(public)

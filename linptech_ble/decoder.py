@@ -6,8 +6,10 @@ from collections import OrderedDict
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+import hashlib
 from math import isfinite
 from struct import error as StructError
+import threading
 from typing import Any
 
 from .config import DeviceConfig
@@ -37,10 +39,22 @@ class Decoder:
     def __init__(self, devices: list[DeviceConfig] | None = None) -> None:
         self.devices = {device.address: device for device in devices or []}
         # Bounded cache: advertisements can repeat a button event on the radio.
-        self._seen: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._seen: OrderedDict[tuple[str, str, bytes], float] = OrderedDict()
+        self._lock = threading.RLock()
 
     def decode(self, record: AdvertisementRecord) -> dict[str, Any]:
+        """Decode atomically across receiver callbacks, preserving their metadata.
+
+        Identical packets share one event-deduplication cache across receivers.
+        Keep one decoder per credential set; separate instances have no shared
+        state. The cache is bounded and is not persistent exactly-once delivery.
+        """
+        with self._lock:
+            return self._decode(record)
+
+    def _decode(self, record: AdvertisementRecord) -> dict[str, Any]:
         configured = self.devices.get(record.address)
+        bindkey = configured.bindkey if configured else None
         result: dict[str, Any] = {
             "timestamp": record.timestamp,
             "address": record.address,
@@ -106,16 +120,22 @@ class Decoder:
         if len(data) < offset + (9 if header["encrypted"] else 3):
             result.update(status="malformed", reason="Truncated object payload")
             return result
-        if header["encrypted"] and not (configured and configured.bindkey):
+        if header["encrypted"] and not bindkey:
             result["status"] = "encrypted_no_key"
             return result
 
         try:
             packet_time = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00")).timestamp()
-            fingerprint = (record.address, raw)
+            # Receiver names/RSSI must not split one button event. Credential
+            # scope prevents a replaced key from inheriting old MIC verification.
+            scope = hashlib.sha256(bytes.fromhex(bindkey)).digest() if header["encrypted"] else b""
+            fingerprint = (record.address, raw, scope)
             previous = self._seen.get(fingerprint)
-            if previous is not None and 0 <= packet_time - previous <= 5:
-                self._seen[fingerprint] = packet_time
+            if previous is not None and packet_time <= previous + 5:
+                # Late deliveries must not replay an event or move its receive
+                # high-water mark backwards. Every duplicate still retains its
+                # own receiver, RSSI and timestamp in the result above.
+                self._seen[fingerprint] = max(previous, packet_time)
                 self._seen.move_to_end(fingerprint)
                 result["status"] = "duplicate"
                 result["bindkey_verified"] = bool(header["encrypted"])
@@ -132,7 +152,7 @@ class Decoder:
                 # before letting any of its values become a successful result.
                 nonce = bytes.fromhex(record.address.replace(":", ""))[::-1] + data[2:5] + data[-7:-4]
                 try:
-                    payload = AESCCM(bytes.fromhex(configured.bindkey), tag_length=4).decrypt(
+                    payload = AESCCM(bytes.fromhex(bindkey), tag_length=4).decrypt(
                         nonce, data[offset:-7] + data[-4:], b"\x11"
                     )
                 except InvalidTag:

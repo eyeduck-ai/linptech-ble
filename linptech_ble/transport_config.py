@@ -23,7 +23,7 @@ class TransportConfig:
         if (type(self.es5_auto_connect) is not bool or type(interval) not in (int, float)
                 or not 5 <= interval <= 3600 or not math.isfinite(interval)):
             raise ValueError("auto_connect 必須是布林值，retry_seconds 需介於 5～3600 秒。")
-        if self.es5_auto_connect and self.bluetooth.backend == "esphome":
+        if self.es5_auto_connect and self.bluetooth.backend == "esphome" and not self.bluetooth.gatt_routes:
             self.bluetooth.direct_proxy()
 
 
@@ -58,10 +58,13 @@ def load_transport_config(path: str | Path | None = None) -> TransportConfig:
         es5 = _object(document.get("es5", {}), {"auto_connect", "retry_seconds"})
         return TransportConfig(transport, es5.get("auto_connect", False), es5.get("retry_seconds", 30))
     except (ValueError, TypeError, KeyError, UnicodeError, RuntimeError, OverflowError):
-        raise ValueError("無效的連線設定；請核對 version、bluetooth.proxies／gatt_proxy、API 加密金鑰與 es5 欄位。") from None
+        raise ValueError("無效的連線設定；請核對 version、bluetooth.proxies／gatt_proxy／gatt_routes、API 加密金鑰與 es5 欄位。") from None
 
 
 def public_transport(config: BluetoothConfig) -> dict[str, Any]:
     """Expose receiver names without host addresses, passwords, or API keys."""
-    return {"backend": config.backend, "proxy_names": [proxy.name for proxy in config.proxies],
-            "gatt_proxy": config.gatt_proxy or (config.proxies[0].name if len(config.proxies) == 1 else None)}
+    result = {"backend": config.backend, "proxy_names": [proxy.name for proxy in config.proxies],
+              "gatt_proxy": config.gatt_proxy or (config.proxies[0].name if len(config.proxies) == 1 else None)}
+    if config.gatt_routes:
+        result["gatt_routes"] = dict(config.gatt_routes)
+    return result

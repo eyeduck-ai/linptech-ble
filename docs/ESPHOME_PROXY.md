@@ -52,10 +52,11 @@ Edit [transport.local.json's example](../examples/transport.example.json):
 | `bluetooth.proxies[].host` | Reachable proxy IP or hostname |
 | `bluetooth.proxies[].port` | Usually `6053` |
 | `bluetooth.proxies[].noise_psk` | The proxy's 32-byte base64 `api.encryption.key` |
-| `bluetooth.gatt_proxy` | Configured proxy name used for GATT |
+| `bluetooth.gatt_proxy` | Default proxy name for GATT |
+| `bluetooth.gatt_routes` | Optional sensor MAC-to-proxy map |
 | `es5.auto_connect` | Start with `false` for manual testing |
 
-The example IP and `REPLACE_...` key are placeholders. Additional proxies receive advertisements concurrently; active GATT uses `gatt_proxy`. The host does not need a local BLE adapter in `esphome` mode. The `local` and `hybrid` backends remain available through the same transport configuration.
+The example IP and `REPLACE_...` key are placeholders. Additional proxies receive advertisements concurrently; active GATT uses the selected proxy. The two supported backends are `local` and `esphome`. The host does not need a local BLE adapter in `esphome` mode.
 
 Keep sensor bindkeys and Standard Auth tokens in `sensors.local.json`. Proxy API keys are separate credentials and do not replace device keys.
 
@@ -66,6 +67,29 @@ python -m linptech_ble dashboard --transport-config transport.local.json --open
 ```
 
 `scan` and `monitor` also accept `--transport-config`. Replay cannot be combined with transport configuration. The Dashboard remains local at [127.0.0.1:8765](http://127.0.0.1:8765/).
+
+### Multiple rooms
+
+Do not configure one physical ESP under both an IP address and a hostname: duplicate physical identities are rejected before subscribing, and the existing owner keeps receiving.
+
+Configure a distinct proxy entry and API key for each receiver. For example, with proxies named `hall`, `bedroom` and `study`, add these fields inside `bluetooth`:
+
+```json
+{
+  "gatt_proxy": "hall",
+  "gatt_routes": {
+    "AA:BB:CC:DD:EE:01": "hall",
+    "AA:BB:CC:DD:EE:02": "bedroom",
+    "AA:BB:CC:DD:EE:03": "study"
+  }
+}
+```
+
+These synthetic addresses can represent ES5BB, KS2BB and HS3BB respectively. MS1BB remains advertisement-only in the released profile and needs no GATT route. A route uses an already configured proxy name. Selection uses the address-specific route, then `gatt_proxy`, then the sole configured proxy. Ambiguous multi-proxy connections fail; routing does not automatically switch to the strongest RSSI.
+
+All configured receivers can observe the same advertisement. Feed them to one `Decoder` to suppress repeated events, while recording every `receiver`/RSSI observation, including results marked `duplicate`. RSSI compares sensor-to-receiver links; it does not measure Wi-Fi or Ethernet quality. See [signal quality](SIGNAL_QUALITY.md).
+
+Reception can start when one proxy is ready while unavailable proxies retry in the background. A partial outage keeps healthy receivers running and reconnects the failed receiver. If all receivers are unavailable, the scanner reports an error; the application decides when to create a new scanner. Inspect per-proxy health rather than treating one working receiver as proof that every room is covered.
 
 ### Migrate an older checkout
 
@@ -83,3 +107,23 @@ Applications choose their own Home Assistant, MQTT or other downstream integrati
 | Radar/PIR remains unchanged | Authenticated session and individual field timestamps |
 
 Confirm advertisements before attempting GATT. Short-press wake was observed for ES5BB and HS3BB; no equivalent procedure is established for MS1BB or KS2BB. Do not hold buttons to reset. Independent ES5BB PIR energy remains unconfirmed with local BLE; changing receivers cannot establish an unreported channel. See [device capabilities](DEVICE_CAPABILITIES.md).
+
+## Physical validation checklist
+
+Physical ESPHome hardware is currently unavailable for this project, so the following checks remain **pending**. Software peers and CI do not replace them.
+
+After preparing private sensor and transport configuration, run the [read-only probe](../examples/library_validate_proxy.py):
+
+```powershell
+python examples/library_validate_proxy.py --config sensors.local.json --transport-config transport.local.json --seconds 180 --gatt-read
+```
+
+`--seconds` sets the initial observation window; optional GATT adds bounded connection/read time while advertisement collection continues. The probe reads one allowlisted property from ES5BB, KS2BB and HS3BB, without streams, calibration or settings writes. Its JSON summary reports per-device/receiver RSSI (up to 600 retained samples), authentication, GATT outcomes and advertisement counts during each read. Missing observations remain unobserved. Keep the output private because it includes sensor addresses.
+
+1. Run `doctor --transport-config transport.local.json` to validate configuration and dependencies. This makes no receiver connection.
+2. Receive a bounded `scan`/`monitor` capture with the host's local BLE adapter disabled. Confirm the intended proxy names and fresh RSSI observations.
+3. Trigger each sensor once and compare decoded values/events with the physical action. Place two proxies within range of one sensor; expect multiple radio observations and one decoded event.
+4. Wake and read ES5BB, KS2BB and HS3BB through their assigned routes. Use the Dashboard or a separate bounded stream example if testing ES5BB radar, then stop it and disconnect. Preserve original settings; begin with reads only.
+5. Disconnect one proxy, confirm the remaining receivers continue, then restore it and check recovery. Record firmware, proxy names, time, gaps and sanitized diagnostics.
+
+Repeat each check for every actual proxy/firmware combination. Keep raw captures and credentials private, and record failures as well as successful observations.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 import ipaddress
@@ -25,6 +26,14 @@ from .config import normalize_address
 
 class TransportError(RuntimeError):
     """A credential-free transport failure suitable for display and logging."""
+
+
+def _endpoint(proxy: ProxyConfig) -> tuple[str, int]:
+    try:
+        host = ipaddress.ip_address(proxy.host).compressed
+    except ValueError:
+        host = proxy.host.lower().rstrip(".")
+    return host, proxy.port
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,7 @@ class ProxyConfig:
                 raise ValueError("Proxy noise_psk 需為 ESPHome API 的 Base64 32-byte 金鑰。") from None
         if self.password is not None and (not isinstance(self.password, str) or not self.password):
             raise ValueError("Proxy password 需為非空字串或 null。")
+        object.__setattr__(self, "host", _endpoint(self)[0])
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,7 @@ class BluetoothConfig:
     proxies: tuple[ProxyConfig, ...] = ()
     gatt_proxy: str | None = None
     connect_timeout: float = 15
+    gatt_routes: tuple[tuple[str, str], ...] | Mapping[str, str] = ()
 
     def __post_init__(self) -> None:
         if self.backend not in {"local", "esphome"}:
@@ -74,25 +85,46 @@ class BluetoothConfig:
         names = [p.name for p in self.proxies]
         if len(names) != len(set(names)):
             raise ValueError("Proxy name 不可重複。")
-        endpoints = [(p.host.lower().rstrip("."), p.port) for p in self.proxies]
+        endpoints = [_endpoint(p) for p in self.proxies]
         if len(endpoints) != len(set(endpoints)):
             raise ValueError("同一 Proxy 位址與埠號不可重複設定。")
         if self.backend == "esphome" and not self.proxies:
             raise ValueError("esphome backend 至少需設定一個 Proxy。")
         if self.gatt_proxy is not None and self.gatt_proxy not in names:
             raise ValueError("gatt_proxy 需指定已設定的 Proxy name。")
+        try:
+            routes = self.gatt_routes.items() if isinstance(self.gatt_routes, Mapping) else self.gatt_routes
+            if not isinstance(routes, (tuple, list)) and not isinstance(self.gatt_routes, Mapping):
+                raise ValueError()
+            normalized = []
+            for address, proxy_name in routes:
+                if not isinstance(proxy_name, str) or proxy_name not in names:
+                    raise ValueError()
+                normalized.append((normalize_address(address), proxy_name))
+            if len({address for address, _ in normalized}) != len(normalized):
+                raise ValueError()
+            object.__setattr__(self, "gatt_routes", tuple(sorted(normalized)))
+        except (ValueError, TypeError):
+            raise ValueError("gatt_routes 需將各裝置 MAC 對應至已設定的 Proxy name，且 MAC 不可重複。") from None
         if type(self.connect_timeout) not in {int, float} or not math.isfinite(self.connect_timeout) or not 1 <= self.connect_timeout <= 120:
             raise ValueError("Bluetooth connect_timeout 需為 1～120 秒。")
 
-    def direct_proxy(self) -> ProxyConfig:
+    def direct_proxy(self, address: str | None = None) -> ProxyConfig:
+        if address is not None:
+            route = dict(self.gatt_routes).get(normalize_address(address))
+            if route:
+                return next(p for p in self.proxies if p.name == route)
         if self.gatt_proxy:
             return next(p for p in self.proxies if p.name == self.gatt_proxy)
         if len(self.proxies) == 1:
             return self.proxies[0]
-        raise TransportError("多個 ESPHome Proxy 時，請先設定 gatt_proxy，指定 ES5BB 所在房間的 Proxy。")
+        raise TransportError("多個 ESPHome Proxy 時，請設定裝置的 gatt_routes 或預設 gatt_proxy。")
 
     def public_info(self) -> dict[str, Any]:
-        return {"backend": self.backend, "proxies": [p.name for p in self.proxies], "gatt_proxy": self.gatt_proxy}
+        result = {"backend": self.backend, "proxies": [p.name for p in self.proxies], "gatt_proxy": self.gatt_proxy}
+        if self.gatt_routes:
+            result["gatt_routes"] = dict(self.gatt_routes)
+        return result
 
 
 def _dependencies() -> tuple[Any, ...]:
@@ -144,21 +176,32 @@ class _ConnectionOnlyScanner:
 
 class _ProxySession:
     """One API owner for a physical proxy, wholly confined to the broker loop."""
-    def __init__(self, proxy: ProxyConfig, timeout: float):
+    def __init__(self, proxy: ProxyConfig, timeout: float, broker: _Broker):
         self.proxy, self.timeout = proxy, timeout
+        self.broker, self.physical_id = broker, None
         self.refs = 0
+        self.owners: set[object] = set()
         self.callbacks: dict[object, Callable] = {}
         self.first = asyncio.Event()
         self.closed = False
         self.data: Any = None
         self.api: Any = None
         self.clients: set[Any] = set()
+        self.connect_lock = asyncio.Lock()
+        self.slot_changed = asyncio.Event()
+        self.reservations: dict[object, int] = {}
+        self.generation = 0
         self.state = {"name": proxy.name, "connected": False, "error": None,
                       "subscription_confirmed": False, "reconnects": 0,
-                      "scanner_state": None, "malformed_advertisements": 0}
+                      "scanner_state": None, "malformed_advertisements": 0,
+                      "callback_errors": 0, "connections_free": 0, "connections_limit": 0, "gatt_reserved": 0}
         self.task = asyncio.create_task(self._run(), name=f"proxy-{proxy.name}")
+        self.task.add_done_callback(lambda _: self.broker.unclaim_physical(self) if self.closed else None)
 
     def _invalidate_clients(self) -> None:
+        self.reservations.clear()
+        self.state.update(connections_free=0, gatt_reserved=0)
+        self.slot_changed.set()
         if self.data:
             self.data.bluetooth_device.async_set_unavailable()
             for callback in list(self.data.disconnect_callbacks):
@@ -173,7 +216,39 @@ class _ProxySession:
             self.state["malformed_advertisements"] += 1
             return
         for callback in list(self.callbacks.values()):
-            callback(*args)
+            try:
+                callback(*args)
+            except Exception:
+                self.state["callback_errors"] += 1
+
+    def _received(self, generation: int, incoming: Any, *, raw: bool = False) -> None:
+        if generation != self.generation or self.closed or self.api is None:
+            return
+        if raw:
+            self._raw_incoming(incoming)
+        else:
+            self._incoming(incoming)
+
+    async def reserve_slot(self, token: object, address: int, data: Any, timeout: float) -> None:
+        """Account for connect requests before firmware publishes allocations."""
+        async with asyncio.timeout(timeout):
+            while True:
+                self.slot_changed.clear()
+                if self.closed or self.data is not data or not self.state["connected"]:
+                    raise TransportError("所選 ESPHome Proxy 已離線；無法保留直連連線槽。")
+                device = data.bluetooth_device
+                reported = set(device.ble_allocations)
+                pending = sum(target not in reported for target in self.reservations.values())
+                if device.ble_connections_free > pending:
+                    self.reservations[token] = address
+                    self.state["gatt_reserved"] = len(self.reservations)
+                    return
+                await self.slot_changed.wait()
+
+    def release_slot(self, token: object) -> None:
+        self.reservations.pop(token, None)
+        self.state["gatt_reserved"] = len(self.reservations)
+        self.slot_changed.set()
 
     def _raw_incoming(self, batch: Any) -> None:
         from bluetooth_data_tools import parse_advertisement_data_bytes
@@ -188,18 +263,29 @@ class _ProxySession:
 
     async def _run(self) -> None:
         while not self.closed:
+            self.generation += 1
+            generation = self.generation
             api, unsub = None, []
             gone, running = asyncio.Event(), asyncio.Event()
             transition: asyncio.TimerHandle | None = None
-            async def on_stop(_expected: bool) -> None:
-                self.state.update(connected=False, error="Proxy API 連線中斷。")
+            async def on_stop(_expected: bool, *, current=generation, stopped=gone) -> None:
+                if current != self.generation:
+                    return
+                self.state.update(connected=False, subscription_confirmed=False)
+                if not _expected or not self.state["error"]:
+                    self.state["error"] = "Proxy API 連線中斷。"
                 self._invalidate_clients()
-                gone.set()
-            def scanner_stalled() -> None:
-                self.state.update(connected=False, error="Proxy 藍牙掃描已停止，請檢查韌體與廣播訂閱是否被其他程式佔用。")
-                gone.set()
-            def on_scanner_state(value: Any) -> None:
+                stopped.set()
+            def scanner_stalled(*, current=generation, stopped=gone) -> None:
+                if current != self.generation:
+                    return
+                self.state.update(connected=False, subscription_confirmed=False,
+                                  error="Proxy 藍牙掃描已停止，請檢查韌體與廣播訂閱是否被其他程式佔用。")
+                stopped.set()
+            def on_scanner_state(value: Any, *, current=generation, started=running, stalled=scanner_stalled) -> None:
                 nonlocal transition
+                if current != self.generation:
+                    return
                 # ESPHome wire values: IDLE 0, STARTING 1, RUNNING 2,
                 # FAILED 3, STOPPING 4, STOPPED 5. Brief pauses are normal
                 # while initiating GATT or changing scan mode.
@@ -209,33 +295,44 @@ class _ProxySession:
                     transition.cancel()
                     transition = None
                 if mode == 2:
-                    running.set()
+                    started.set()
                 elif mode == 3:
-                    scanner_stalled()
-                elif running.is_set():
-                    transition = asyncio.get_running_loop().call_later(5, scanner_stalled)
+                    stalled()
+                elif started.is_set():
+                    transition = asyncio.get_running_loop().call_later(5, stalled)
             try:
                 api = self.api = _api_client(self.proxy)
                 async with asyncio.timeout(self.timeout):
                     await api.connect(on_stop=on_stop, login=True, log_errors=False)
                     info = await api.device_info()
+                    # Different DNS names/IPs can still reach one ESP. Claim its
+                    # physical identity before any BLE subscription can replace
+                    # another session's advertisement/GATT owner.
+                    self.broker.claim_physical(self, info)
                     _, feature, _, data_type, device_type = _dependencies()
                     flags = info.bluetooth_proxy_feature_flags_compat(api.api_version)
                     if not flags & feature.PASSIVE_SCAN:
                         raise TransportError("ESPHome 裝置未啟用 Bluetooth Proxy；請檢查 bluetooth_proxy 韌體設定。")
                     if flags & feature.ACTIVE_CONNECTIONS:
-                        source = info.bluetooth_mac_address or info.mac_address
+                        source = self.physical_id
                         device = device_type(self.proxy.name, source, available=True)
                         self.data = data_type(bluetooth_device=device, client=api, device_info=info,
                             api_version=api.api_version, title=self.proxy.name, scanner=_ConnectionOnlyScanner())
-                        unsub.append(api.subscribe_bluetooth_connections_free(device.async_update_ble_connection_limits))
+                        def on_slots(free, limit, allocated, *, current=generation, target=device):
+                            if current == self.generation:
+                                target.async_update_ble_connection_limits(free, limit, allocated)
+                                self.state.update(connections_free=free, connections_limit=limit)
+                                self.slot_changed.set()
+                        unsub.append(api.subscribe_bluetooth_connections_free(on_slots))
                     has_state = bool(flags & feature.FEATURE_STATE_AND_MODE)
                     if has_state:
                         unsub.append(api.subscribe_bluetooth_scanner_state(on_scanner_state))
                     if flags & feature.RAW_ADVERTISEMENTS:
-                        unsub.append(api.subscribe_bluetooth_le_raw_advertisements(self._raw_incoming))
+                        unsub.append(api.subscribe_bluetooth_le_raw_advertisements(
+                            lambda value, current=generation: self._received(current, value, raw=True)))
                     else:
-                        unsub.append(api.subscribe_bluetooth_le_advertisements(self._incoming))
+                        unsub.append(api.subscribe_bluetooth_le_advertisements(
+                            lambda value, current=generation: self._received(current, value)))
                     if has_state:
                         # A RUNNING reply proves the subscription was accepted
                         # and the radio is scanning, not merely API-connected.
@@ -258,7 +355,7 @@ class _ProxySession:
                 public = str(error) if isinstance(error, TransportError) else f"Proxy 連線或廣播訂閱失敗（{type(error).__name__}）；檢查 API 設定並避免其他程式佔用廣播訂閱。"
                 self.state.update(connected=False, error=public)
             finally:
-                self.state["connected"] = False
+                self.state.update(connected=False, subscription_confirmed=False)
                 self.first.set()
                 self._invalidate_clients()
                 self.data = None
@@ -278,7 +375,11 @@ class _ProxySession:
     async def close(self) -> None:
         self.closed = True
         self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
+        try:
+            await asyncio.gather(self.task, return_exceptions=True)
+        finally:
+            if self.task.done():
+                self.broker.unclaim_physical(self)
 
 
 class _Broker:
@@ -286,6 +387,7 @@ class _Broker:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
         self.sessions: dict[ProxyConfig, _ProxySession] = {}
+        self.physical_sessions: dict[str, _ProxySession] = {}
         self.thread = threading.Thread(target=self._run, name="esphome-api", daemon=True)
         self.thread.start()
 
@@ -298,10 +400,36 @@ class _Broker:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))
 
-    async def acquire(self, proxy: ProxyConfig, timeout: float, token: object, callback=None):
+    def claim_physical(self, session: _ProxySession, info: Any) -> None:
+        identity = None
+        for value in (getattr(info, "bluetooth_mac_address", None), getattr(info, "mac_address", None)):
+            try:
+                candidate = normalize_address(value)
+            except (ValueError, TypeError):
+                continue
+            if candidate not in {"00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"}:
+                identity = candidate
+                break
+        if identity is None:
+            raise TransportError("ESPHome Proxy 未提供有效的實體裝置識別位址；請檢查韌體。")
+        current = self.physical_sessions.get(identity)
+        if current is not None and current is not session and not (current.closed and current.task.done()):
+            raise TransportError("同一實體 ESPHome Proxy 已由另一設定使用；請移除重複 IP 或主機名稱別名。")
+        if session.physical_id != identity:
+            self.unclaim_physical(session)
+        self.physical_sessions[identity] = session
+        session.physical_id = identity
+
+    def unclaim_physical(self, session: _ProxySession) -> None:
+        identity = session.physical_id
+        if identity is not None and self.physical_sessions.get(identity) is session:
+            del self.physical_sessions[identity]
+        session.physical_id = None
+
+    async def acquire(self, proxy: ProxyConfig, timeout: float, token: object, callback=None, *, wait_ready: bool = True):
         # Refuse conflicting owners of one endpoint instead of opening another
         # API subscription with a different name/key by accident.
-        if any(p != proxy and (p.host.lower().rstrip("."), p.port) == (proxy.host.lower().rstrip("."), proxy.port)
+        if any(p != proxy and _endpoint(p) == _endpoint(proxy)
                for p in self.sessions):
             raise TransportError("同一 ESPHome Proxy 已由不同設定使用；請統一 Proxy 名稱與 API 設定。")
         session = self.sessions.get(proxy)
@@ -313,12 +441,16 @@ class _Broker:
                 del self.sessions[proxy]
             session = self.sessions.get(proxy)
         if session is None:
-            session = self.sessions[proxy] = _ProxySession(proxy, timeout)
-        session.refs += 1
+            session = self.sessions[proxy] = _ProxySession(proxy, timeout, self)
+        if token in session.owners:
+            raise TransportError("同一代理連線控制代碼不可重複使用。")
+        session.owners.add(token)
+        session.refs = len(session.owners)
         if callback:
             session.callbacks[token] = callback
         try:
-            await session.first.wait()
+            if wait_ready:
+                await session.first.wait()
         except BaseException:
             await self.release(proxy, token)
             raise
@@ -328,8 +460,11 @@ class _Broker:
         session = self.sessions.get(proxy)
         if session is None:
             return
+        if token not in session.owners:
+            return
+        session.owners.remove(token)
         session.callbacks.pop(token, None)
-        session.refs -= 1
+        session.refs = len(session.owners)
         if not session.refs:
             await session.close()
             if self.sessions.get(proxy) is session:
@@ -360,6 +495,27 @@ class _RemoteScanner:
         self.sessions: list[_ProxySession] = []
         self.token = object()
         self.closed = False
+        self.callback_error = False
+        self.callback_tasks: set[asyncio.Task] = set()
+
+    def _detected(self, *args) -> None:
+        if self.closed or self.callback_error:
+            return
+        try:
+            if len(self.callback_tasks) >= 128:
+                raise TransportError("廣播回呼處理速度不足。")
+            result = self.callback(*args)
+            if inspect.isawaitable(result):
+                task = asyncio.ensure_future(result)
+                self.callback_tasks.add(task)
+                task.add_done_callback(self._callback_done)
+        except Exception:
+            self.callback_error = True
+
+    def _callback_done(self, task: asyncio.Task) -> None:
+        self.callback_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self.callback_error = True
 
     @property
     def tasks(self):
@@ -367,13 +523,16 @@ class _RemoteScanner:
 
     @property
     def state(self):
-        return {s.proxy.name: s.state for s in self.sessions}
+        return {s.proxy.name: dict(s.state) for s in self.sessions}
 
     def health(self) -> dict[str, Any]:
         return {"backend": "esphome", "connected": any(s.state["connected"] for s in self.sessions),
-                "proxies": [dict(s.state) for s in self.sessions]}
+                "proxies": [dict(s.state) for s in self.sessions],
+                "callback_error": "廣播回呼失敗或處理速度不足。" if self.callback_error else None}
 
     def check_health(self) -> None:
+        if self.callback_error:
+            raise TransportError("廣播回呼失敗或處理速度不足；其他接收端仍可繼續使用代理。")
         if not self.health()["connected"]:
             raise TransportError("所有 ESPHome Proxy 均已離線或停止掃描；請確認網路、API 金鑰與廣播訂閱擁有者。")
 
@@ -384,11 +543,19 @@ class _RemoteScanner:
         async def open_all():
             async def open_one(proxy):
                 session = await broker.acquire(proxy, self.config.connect_timeout, self.token,
-                    lambda *args: _deliver(loop, self.callback, *args))
+                    lambda *args: _deliver(loop, self._detected, *args), wait_ready=False)
                 self.sessions.append(session)
             opening = [asyncio.create_task(open_one(proxy)) for proxy in self.config.proxies]
             try:
                 await asyncio.gather(*opening)
+                pending = {asyncio.create_task(session.first.wait()) for session in self.sessions}
+                try:
+                    while pending and not any(session.state["connected"] for session in self.sessions):
+                        _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
             except BaseException:
                 for task in opening:
                     task.cancel()
@@ -409,6 +576,11 @@ class _RemoteScanner:
         if self.closed:
             return
         self.closed = True
+        pending = list(self.callback_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=.2)
         async def close_all():
             for session in self.sessions:
                 await _broker().release(session.proxy, self.token)
@@ -551,7 +723,7 @@ async def connected_client(config: BluetoothConfig | None, address: str, name: s
         return
 
     _dependencies()
-    proxy, token, session, client = config.direct_proxy(), object(), None, None
+    proxy, token, session, client = config.direct_proxy(address), object(), None, None
     broker, caller_loop = _broker(), asyncio.get_running_loop()
     async def open_client():
         nonlocal session, client
@@ -561,12 +733,18 @@ async def connected_client(config: BluetoothConfig | None, address: str, name: s
                 raise TransportError("所選 ESPHome Proxy 尚未就緒；請確認 API 與廣播訂閱狀態。")
             if not session.data:
                 raise TransportError("所選 ESPHome Proxy 僅支援廣播；裝置直連需設定 bluetooth_proxy.active: true。")
-            data = session.data
-            await data.bluetooth_device.wait_for_ble_connections_free(config.connect_timeout)
-            target = BLEDevice(address, name, {"source": data.bluetooth_device.mac_address, "address_type": 0})
-            client = BleakClient(target, backend=_dependencies()[2], client_data=data, timeout=18)
-            session.clients.add(client)
-            await asyncio.wait_for(client.connect(), 22)
+            await asyncio.wait_for(session.connect_lock.acquire(), config.connect_timeout)
+            try:
+                data = session.data
+                if data is None:
+                    raise TransportError("所選 ESPHome Proxy 已離線；請稍後重試。")
+                await session.reserve_slot(token, int(address.replace(":", ""), 16), data, config.connect_timeout)
+                target = BLEDevice(address, name, {"source": data.bluetooth_device.mac_address, "address_type": 0})
+                client = BleakClient(target, backend=_dependencies()[2], client_data=data, timeout=18)
+                session.clients.add(client)
+                await asyncio.wait_for(client.connect(), 22)
+            finally:
+                session.connect_lock.release()
             return _RemoteClient(client, caller_loop)
         except asyncio.CancelledError:
             raise
@@ -581,6 +759,7 @@ async def connected_client(config: BluetoothConfig | None, address: str, name: s
             with suppress(Exception):
                 await asyncio.wait_for(client.disconnect(), 5)
         if session:
+            session.release_slot(token)
             await broker.release(proxy, token)
     try:
         facade = await broker.call(open_client())

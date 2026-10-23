@@ -15,16 +15,20 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import inspect
 import math
+import threading
 from types import MappingProxyType
 from typing import Any
 
 from .config import DeviceConfig, MIOT_MODELS
+from .gatt import GattConnectionFactory
 from .standard_auth import DirectError, PropertyUnavailable, StandardSession, encode_value
 from .transport import BluetoothConfig, TransportError, connected_client
 
 PropertyKey = str | tuple[int, int]
 _CLOSED = object()
 _COUNT_LIMIT = (1 << 63) - 1
+_GATT_LEASE_LOCK = threading.Lock()
+_GATT_LEASES: dict[str, object] = {}
 
 
 class ClientError(DirectError):
@@ -122,7 +126,11 @@ def _catalog(model: str) -> tuple[dict[str, PropertyDefinition], dict[str, Any]]
 
 
 def _timeout(value: float, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    try:
+        valid = type(value) in (int, float) and value > 0 and math.isfinite(value)
+    except OverflowError:
+        valid = False
+    if not valid:
         raise ValueError(f"{name} must be a finite positive number.")
     return float(value)
 
@@ -145,9 +153,18 @@ class LinptechClient:
     Cancelling/timing out a wire operation closes the connection to avoid
     continuing a potentially partial transaction. Cancelling an ``updates``
     iterator only removes that observer. Context exit always releases GATT.
+
+    An optional ``connection_factory(address, name)`` supplies a connected,
+    Bleak-compatible client through an async context manager. The factory owns
+    resolution, physical connection, partial-entry cleanup, and disconnection;
+    this client owns authentication and its notification/stream subscriptions.
+    Factory entry and exit honor ``connection_timeout`` and must cooperate with
+    cancellation. Explicit ``transport`` and a factory are mutually exclusive.
+    Only one LinptechClient per MAC may own GATT in this process at a time.
     """
 
     def __init__(self, device: DeviceConfig, *, transport: BluetoothConfig | None = None,
+                 connection_factory: GattConnectionFactory | None = None, connection_timeout: float = 15,
                  on_update: Callable[[PropertyValue], Any] | None = None,
                  auth_timeout: float = 35, operation_timeout: float = 15,
                  queue_size: int = 256) -> None:
@@ -159,8 +176,17 @@ class LinptechClient:
             raise ValueError("queue_size must be an integer between 1 and 65536.")
         if transport is not None and not isinstance(transport, BluetoothConfig):
             raise TypeError("transport must be a BluetoothConfig or None.")
+        if connection_factory is not None and not callable(connection_factory):
+            raise TypeError("connection_factory must be callable or None.")
+        if transport is not None and connection_factory is not None:
+            raise ValueError("Choose transport or connection_factory, not both.")
         self._device = replace(device)
         self.transport = transport or BluetoothConfig()
+        self.connection_timeout = _timeout(connection_timeout, "connection_timeout")
+        self._connection_factory = connection_factory
+        self._context_entered = False
+        self._connection_cleanup = {"status": "not_started", "error_type": None}
+        self._lease_token: object | None = None
         self.auth_timeout = _timeout(auth_timeout, "auth_timeout")
         self.operation_timeout = _timeout(operation_timeout, "operation_timeout")
         self.queue_size, self.on_update = queue_size, on_update
@@ -233,6 +259,7 @@ class LinptechClient:
         return deepcopy({"model": self.model, "connected": self.connected,
             "session_state": "current" if self._session else "last_closed" if session is not None else "not_started",
             "session": session, "stream_mode": self._stream_mode,
+            "connection_cleanup": self._connection_cleanup,
             "stream_mode_is_acknowledgement_only": True,
             "stream_mode_before_close": self._stream_mode_before_close,
             "pir_data_received": bool(self._valid_op4_updates.get("pir_energy", {}).get("count", 0)),
@@ -270,6 +297,19 @@ class LinptechClient:
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()
 
+    def _acquire_gatt_lease(self) -> None:
+        with _GATT_LEASE_LOCK:
+            if self._device.address in _GATT_LEASES:
+                raise ClientError("This device already has an active Linptech GATT connection.", code="device_busy")
+            self._lease_token = object()
+            _GATT_LEASES[self._device.address] = self._lease_token
+
+    def _release_gatt_lease(self) -> None:
+        with _GATT_LEASE_LOCK:
+            if self._lease_token is not None and _GATT_LEASES.get(self._device.address) is self._lease_token:
+                del _GATT_LEASES[self._device.address]
+            self._lease_token = None
+
     async def connect(self) -> LinptechClient:
         if not self.supported:
             raise ClientError("This released model has no supported GATT settings; use advertisement decoding.", code="advertisement_only")
@@ -292,9 +332,30 @@ class LinptechClient:
                 self._close_task = None
             self._closing = False
             self._opening_task = asyncio.current_task()
+            self._connection_cleanup = {"status": "not_started", "error_type": None}
             try:
-                self._context = connected_client(self.transport, self._device.address, self._device.name)
-                self._ble = await self._context.__aenter__()
+                self._acquire_gatt_lease()
+                self._context_entered = False
+                if self._connection_factory is None:
+                    self._context = connected_client(self.transport, self._device.address, self._device.name)
+                    self._ble = await self._context.__aenter__()
+                else:
+                    context = self._connection_factory(self._device.address, self._device.name)
+                    if inspect.iscoroutine(context):
+                        context.close()
+                        raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
+                    if not callable(getattr(context, "__aenter__", None)) or not callable(getattr(context, "__aexit__", None)):
+                        raise ClientError("Connection factory must return an async context manager.", code="connection_failed")
+                    self._context = context
+                    try:
+                        self._ble = await asyncio.wait_for(context.__aenter__(), self.connection_timeout)
+                    except asyncio.TimeoutError:
+                        raise ClientError("GATT connection opening timed out.", code="connection_timeout") from None
+                self._context_entered = True
+                if (not self._ble.is_connected or not callable(getattr(self._ble.services, "get_characteristic", None))
+                        or any(not callable(getattr(self._ble, name, None))
+                               for name in ("start_notify", "stop_notify", "write_gatt_char"))):
+                    raise ClientError("Connection factory did not yield a connected GATT client.", code="connection_failed")
                 self._valid_op4_updates = {}
                 self._last_session_diagnostics = None
                 self._stream_mode_before_close = None
@@ -308,6 +369,14 @@ class LinptechClient:
                 # it up. Waiting for that same close here would form a cycle.
                 if not self._closing:
                     await self.aclose()
+                if self._connection_factory is not None and not isinstance(error, asyncio.CancelledError):
+                    messages = {
+                        "device_busy": "This device already has an active Linptech GATT connection.",
+                        "connection_timeout": "GATT connection opening timed out.",
+                        "connection_failed": "GATT connection/authentication failed.",
+                    }
+                    code = error.code if isinstance(error, ClientError) and error.code in messages else "connection_failed"
+                    raise ClientError(messages[code], code=code) from None
                 if isinstance(error, (asyncio.CancelledError, DirectError, TransportError)):
                     raise
                 raise ClientError(f"Connection/authentication failed ({type(error).__name__}).", code="connection_failed") from None
@@ -402,6 +471,12 @@ class LinptechClient:
         except (asyncio.CancelledError, asyncio.TimeoutError):
             if self._session is session:
                 await self.aclose()
+            raise
+        except Exception as error:
+            if self._connection_factory is not None and not isinstance(error, DirectError):
+                if self._session is session:
+                    await self.aclose()
+                raise ClientError("GATT operation failed; the connection was released.", code="connection_failed") from None
             raise
 
     async def read(self, key: PropertyKey, *, subscribe: bool | None = None) -> PropertyValue:
@@ -705,10 +780,26 @@ class LinptechClient:
                 self._last_session_diagnostics = session.diagnostics()
             self._session = None
             self._stream_mode = "off"
-            if context:
-                with suppress(Exception):
-                    await asyncio.wait_for(context.__aexit__(None, None, None), self.transport.connect_timeout + 10)
-            self._ble, self._context = None, None
+            try:
+                if context and (self._connection_factory is None or self._context_entered):
+                    try:
+                        await asyncio.wait_for(context.__aexit__(None, None, None),
+                            self.connection_timeout if self._connection_factory else self.transport.connect_timeout + 10)
+                    except asyncio.TimeoutError:
+                        if self._context_entered:
+                            self._connection_cleanup = {"status": "timeout", "error_type": "TimeoutError"}
+                    except asyncio.CancelledError:
+                        if self._context_entered:
+                            self._connection_cleanup = {"status": "cancelled", "error_type": "CancelledError"}
+                    except Exception as error:
+                        if self._context_entered:
+                            self._connection_cleanup = {"status": "error", "error_type": type(error).__name__}
+                    else:
+                        if self._context_entered:
+                            self._connection_cleanup = {"status": "closed", "error_type": None}
+            finally:
+                self._ble, self._context, self._context_entered = None, None, False
+                self._release_gatt_lease()
             callback = self._callback_task
             if callback and callback not in self._close_waiters:
                 callback.cancel()

@@ -9,6 +9,7 @@ include docs/CAPABILITY_API.md docs/PIR_INVESTIGATION.md docs/HS3BB_WAKE.md
 include examples/library_*.py
 include examples/transport.example.json examples/esphome-proxy-wifi.yaml examples/esphome-proxy-ethernet.yaml
 recursive-include linptech_ble *.py
+include linptech_ble/py.typed
 recursive-include linptech_ble/web *.html *.css *.js *.svg
 recursive-include linptech_ble/specs *.json
 prune .private

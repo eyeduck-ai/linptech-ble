@@ -36,7 +36,7 @@ include = ["linptech_ble*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-linptech_ble = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "specs/*.json"]
+linptech_ble = ["py.typed", "web/*.html", "web/*.css", "web/*.js", "web/*.svg", "specs/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

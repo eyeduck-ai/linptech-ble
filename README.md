@@ -33,6 +33,20 @@ result = decoder.decode(AdvertisementRecord.from_dict(raw_record))
 
 `Decoder` performs no Bluetooth or network I/O. Its model-scoped object catalog extends the existing xiaomi-ble helpers. Reuse it to suppress recent duplicate events. Existing HA/Bleak-compatible scanner data can be passed through `decode_service_info(info, decoder, timestamp=received_at)`. Missing values remain unknown; encrypted extensions require valid MIC, structure and values.
 
+For an application that also needs reception, the public `AdvertisementScanner` is an async context and iterator:
+
+```python
+from linptech_ble import AdvertisementScanner
+
+async def receive(decoder, transport=None):
+    async with AdvertisementScanner(transport=transport) as scanner:
+        async for record in scanner:
+            result = decoder.decode(record)
+            print(record.receiver, record.rssi, result["status"])
+```
+
+The scanner owns reception and bounded queues; the application owns decoding, storage and connection policy. Multiple proxies retain separate RSSI observations while one decoder suppresses repeated sensor events.
+
 ## Connect directly
 
 Direct connections require a **separate 12-byte Standard Auth token**, supplied as a 24-character hex string. A broadcast bindkey cannot replace it.
@@ -47,7 +61,7 @@ async def read_presence(address, auth_token):
         return value.value if value.valid else None
 ```
 
-The async client supports selected reads, bounded updates, ES5BB streams and allowlisted writes with fresh reads and independent readback. It owns no Dashboard. The caller controls reconnection, observation timeouts and keepalive.
+The async client supports selected reads, bounded updates, ES5BB streams and allowlisted writes with fresh reads and independent readback. Pass a caller-owned connection factory when an existing host manages Bluetooth. The caller controls reconnection, observation timeouts and keepalive. See [connection ownership](docs/LIBRARY.md#host-owned-gatt-connections).
 
 | Model | Advertisement data | Direct support |
 | --- | --- | --- |
@@ -62,7 +76,7 @@ See [device capabilities and evidence](docs/DEVICE_CAPABILITIES.md) for field-le
 
 - [Library guide](docs/LIBRARY.md): decoding, adapters, async client, streams and ESPHome.
 - [Capabilities and JSON Schema](docs/CAPABILITY_API.md): static definitions and evidence; `client.diagnostics()` provides payload-free session counters.
-- Runnable examples: [decode](examples/library_decode.py), [local direct connection](examples/library_direct.py), [proxy connection](examples/library_proxy.py).
+- Runnable examples: [receive and decode](examples/library_scan.py), [offline decoding](examples/library_decode.py), [local direct connection](examples/library_direct.py), [proxy connection](examples/library_proxy.py), [read-only proxy validation](examples/library_validate_proxy.py).
 
 ## Optional live test Dashboard
 

@@ -4,6 +4,8 @@
 
 The public API works independently of the Dashboard, CLI and configuration files. Imports, `DeviceConfig`, `Decoder` construction and client construction do not open Bluetooth or load credentials. Supply your own keys; no Xiaomi account or gateway is required at runtime.
 
+Distributions include the `py.typed` marker for inline type information, including the public GATT connection protocols.
+
 ## Decode caller-supplied advertisements
 
 ```python
@@ -27,7 +29,9 @@ result = decoder.decode(record)
 result = decode_service_info(info, decoder, timestamp=received_at)
 ```
 
-Adapters require a MAC address and advertisement fields. Supply a UTC wall-clock timestamp for historical data; an omitted timestamp uses current UTC, not a scanner's monotonic clock. Keep one decoder to retain per-device duplicate suppression. Identical packets repeated within five seconds do not replay button events; this is not persistent exactly-once delivery.
+Adapters require a MAC address and advertisement fields. Supply a UTC wall-clock timestamp for historical data; an omitted timestamp uses current UTC, not a scanner's monotonic clock. Receiver provenance uses `info.source` or an explicit `receiver=` argument. For example, `record_from_service_info(info, timestamp=received_at, receiver="bedroom")` labels the receiver independently of the sensor address.
+
+Keep one decoder for the device inventory. Identical packets received through several proxies within five seconds do not replay button events. Each result still carries its own `receiver`, `rssi` and timestamp, including duplicate results, so applications can record every receiver's signal observation. This is recent-packet suppression, not persistent exactly-once delivery.
 
 Each result describes one packet, not accumulated device state:
 
@@ -42,6 +46,25 @@ Each result describes one packet, not accumulated device state:
 Missing data stays unknown. Silence is not absence. Unknown objects/enums remain diagnostic; malformed known objects reject the entire packet. Encrypted extensions accept authenticated MiBeacon V4/V5, not Mesh or legacy unauthenticated encryption. Raw decode results may contain addresses and payloads; handle them as application data.
 
 `object_catalog(model=None)` lists supported advertisement definitions. `hex_series()`, `bitmap_data()` and `radar_bins()` transform ES5BB direct values; `bitmap_data(value)["pir"]` is a trigger flag, not raw PIR energy. `EmptyRoomScan` calculates an empty-room threshold preview from supplied samples and never connects or writes.
+
+## Receive advertisements
+
+```python
+from linptech_ble import AdvertisementScanner
+
+async def receive(device, decoder, transport=None):
+    async with AdvertisementScanner(
+        transport=transport, addresses=[device.address], queue_size=1024,
+    ) as scanner:
+        async for record in scanner:
+            result = decoder.decode(record)
+            # Store radio observations even when result["status"] == "duplicate".
+            print(record.receiver, record.rssi, result["events"])
+```
+
+`AdvertisementScanner(*, transport=None, addresses=None, queue_size=1024)` starts reception only when entered. It yields `AdvertisementRecord` values; it does not read credentials, decode packets, write files or start a Dashboard. The default transport is local BLE; pass `BluetoothConfig` for ESPHome. `addresses` optionally limits sensor MAC addresses. Each instance has one context lifetime and one active iterator on the loop that entered it; create a new instance to restart. Exit the context or call `await scanner.aclose()` to release reception. Cancelling one iterator wait alone leaves its context open.
+
+The queue is bounded and drops oldest records when full. `scanner.health()` reports queue counters, including `counts["dropped"]`, plus receiver health without credentials or packet payloads. Keep processing nonblocking; it is not a lossless recorder. Closing discards buffered records. Applications that already own a scanner should use the adapters above instead of starting a second subscription.
 
 ## Authenticated async client
 
@@ -59,7 +82,7 @@ async def inspect_sensor(address, auth_token):
 
 `auth_token` is a separate 12-byte Standard Auth token encoded as 24 hex characters. It cannot be derived or substituted from the bindkey by this API. Credentials are excluded from configuration repr; the caller chooses storage and lifecycle.
 
-`LinptechClient(device, *, transport=None, on_update=None, auth_timeout=35, operation_timeout=15, queue_size=256)` belongs to one asyncio loop. Entering its async context connects and authenticates; it does not refresh every property, start a stream or change settings. `connect()` / `aclose()` are also available.
+`LinptechClient(device, *, transport=None, connection_factory=None, connection_timeout=15, on_update=None, auth_timeout=35, operation_timeout=15, queue_size=256)` belongs to one asyncio loop. Entering its async context connects and authenticates; it does not refresh every property, start a stream or change settings. `connect()` / `aclose()` are also available.
 
 | API | Result |
 | --- | --- |
@@ -90,6 +113,26 @@ async def try_sensitivity(device):
 ```
 
 A disconnect can prevent restoration; the application must report an unresolved change rather than assume success.
+
+## Host-owned GATT connections
+
+```python
+from linptech_ble import GattConnectionFactory, LinptechClient
+
+async def read_with_host(device, factory: GattConnectionFactory):
+    async with LinptechClient(device, connection_factory=factory) as client:
+        return await client.read("occupancy_status")
+```
+
+The factory receives only `(address, name)` and returns an async context manager yielding a connected `GattClient`. This public protocol describes the Bleak-compatible services, notification and write operations required by Standard Auth. Device bindkeys and tokens are not passed to the factory.
+
+The host resolves the device through its own Bluetooth manager, obtains an exclusive connection and releases it through the factory context. Create, connect and use that client on the `LinptechClient` event loop; notification callbacks must also run there. A Home Assistant integration can provide this factory and feed its existing scanner data through the adapters; this package installs no HA manager or scanner for it.
+
+Explicit `transport=` and `connection_factory=` are mutually exclusive. Factory entry and exit are bounded by `connection_timeout`; authentication and wire operations retain their separate timeouts. The context must clean up partial entry when cancelled or failing. The library stops its own report/notification activity before leaving the context; the host retains responsibility for its connection resources.
+
+Library clients reserve each normalized sensor MAC within one Python process. A competing session fails promptly with `ClientError.code == "device_busy"`; the reservation ends after cleanup. Different sensor addresses can run concurrently, subject to receiver capacity. This guard does not coordinate other applications or processes.
+
+Inspect `client.diagnostics()["connection_cleanup"]` after closing: `status` is `closed`, `timeout`, `error` or `cancelled`, with a sanitized `error_type`; `not_started` means cleanup has not run for an entered context. It resets on the next connection attempt. Cleanup failures do not replace a primary operation error or caller cancellation. The logical MAC reservation is released after cleanup finishes or times out; a failed factory exit does not prove physical disconnection, and the host must resolve its remaining connection resources.
 
 ## ES5BB streams and lifecycle
 
@@ -154,7 +197,9 @@ async def read_via_proxy(device):
         return await client.read("occupancy_status")
 ```
 
-Replace the documentation IP and supply your own ESPHome API encryption key. Install `.[proxy]`; the proxy needs `active: true` and an available GATT slot. Multiple proxies require `gatt_proxy`. Advertisement and GATT traffic share one Native API connection per proxy. This standalone transport must own the BLE subscription; do not simultaneously assign the same proxy to HA's native Bluetooth integration.
+Replace the documentation IP and supply your own ESPHome API encryption key. Install `.[proxy]`; the proxy needs `active: true` and an available GATT slot. With multiple proxies, set `gatt_proxy` or a `gatt_routes={device.address: "room"}` override. Address routes take precedence over the default; an unambiguous single-proxy setup needs neither. Routing is explicit rather than RSSI-driven.
+
+Advertisement and GATT traffic share one Native API connection per proxy. This standalone transport must own the BLE subscription; do not simultaneously assign the same proxy to HA's native Bluetooth integration. A host that already owns Bluetooth should provide its scanner data and connection factory instead.
 
 Use these APIs from your own application or downstream integration. Protocol parsing and device access remain in this library; publishing state to another system belongs to the caller. See [ESPHome setup](ESPHOME_PROXY.md).
 
@@ -164,6 +209,6 @@ Four models' advertisements were authenticated on real devices. Local Windows di
 
 ES5BB radar and PIR trigger flags work; independent PIR energy still has no valid samples. Static specification and command ACK do not establish that channel's availability. Native SDK wire details remain uncertain; permanent firmware non-support is not proven. Physical ESPHome transport remains unverified. See [device comparison](DEVICE_CAPABILITIES.md), [PIR investigation](PIR_INVESTIGATION.md) and [HS3BB wake](HS3BB_WAKE.md).
 
-Runnable examples: [decode](../examples/library_decode.py), [direct/diagnostics](../examples/library_direct.py), [proxy](../examples/library_proxy.py). They read credentials from caller-provided environment variables when explicitly executed.
+Runnable examples: [decode](../examples/library_decode.py), [direct/diagnostics](../examples/library_direct.py), [proxy](../examples/library_proxy.py), [live scan](../examples/library_scan.py) and [read-only proxy validation](../examples/library_validate_proxy.py). The first three use caller-provided environment variables; the latter two explicitly read selected private configuration files. Importing these examples performs no I/O.
 
 For live hardware testing, use `start-dashboard.cmd` or `python -m linptech_ble dashboard --open` with your existing local `sensors.local.json`. Replay/demo mode is sample data, not a live connection. See [Windows Dashboard](DASHBOARD_WINDOWS.md). Controllers, workers and HTTP state are internal tools, not public API.

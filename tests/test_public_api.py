@@ -31,11 +31,17 @@ import json, pathlib, socket, threading, sys
 def forbidden(*args, **kwargs):
     raise AssertionError("Import attempted application I/O")
 threading.Thread.start = forbidden
-socket.socket = forbidden
+class ForbiddenSocket(socket.socket):
+    def __init__(self, *args, **kwargs):
+        forbidden()
+socket.socket = ForbiddenSocket
 pathlib.Path.read_text = forbidden
 import linptech_ble
 assert linptech_ble.__version__ == "0.4.0"
 assert "LinptechClient" in dir(linptech_ble)
+from linptech_ble import AdvertisementScanner, GattClient, GattConnectionFactory
+scanner = AdvertisementScanner()
+assert not scanner.health()["listening"]
 for name in ("bleak", "xiaomi_ble", "cryptography", "aioesphomeapi", "paho", "linptech_ble.dashboard", "linptech_ble.client"):
     assert name not in sys.modules, name
 print("safe-import")

@@ -582,13 +582,32 @@ class DirectController:
                     message="正在收集空房能量；出現有人或資料中斷時，30 秒計時會重新開始。")
 
 
+    def _sync_client_property(self, client: LinptechClient, name: str) -> None:
+        """Synchronize failed-operation cache without waiting for queued callbacks."""
+        if self.client is not client:
+            return
+        # Preserve the primary failure even if an application callback or log
+        # fails while publishing the SDK's authoritative cached observation.
+        with suppress(Exception):
+            self._accept(client.get_property(name))
+        with suppress(Exception):
+            self._update(client_diagnostics=client.diagnostics())
+
     async def _set(self, name: str, value: Any) -> None:
-        if self.client is None:
+        client = self.client
+        if client is None:
             raise DirectError("請先連線並完成認證。")
         self._update(status="writing", error=None)
-        self._accept(await self.client.set(name, value))
+        try:
+            observed = await client.set(name, value)
+        except BaseException:
+            self._sync_client_property(client, name)
+            raise
+        if self.client is not client:
+            raise DirectError("直連已變更，請重新讀取。")
+        self._accept(observed)
         self._diagnostic("setting_verified", property=name, value=value)
-        self._update(status="ready", client_diagnostics=self.client.diagnostics())
+        self._update(status="ready", client_diagnostics=client.diagnostics())
 
     async def _disconnect(self) -> None:
         sdk, self.client = self.client, None

@@ -174,6 +174,57 @@ def test_hs3_controller_keeps_invalid_firmware_values_and_rechecks_before_write(
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
+@pytest.mark.parametrize("model,name,pair,invalid,target,format", [
+    ("ES5BB", "sensitivity_level", (6, 11), 5, 2, "uint8"),
+    ("KS2BB", "temperature_unit", (6, 2), 2, 1, "uint8"),
+    ("HS3BB", "detection_interval", (2, 2), 25, 20, "uint16"),
+])
+def test_failed_write_syncs_invalid_cache_before_delayed_callbacks(monkeypatch, tmp_path, model, name, pair, invalid, target, format):
+    radio = Radio(monkeypatch, peer_factory=es5_peer if model == "ES5BB" else lambda: sensor_peer(model))
+    controller_type = DirectController if model == "ES5BB" else SensorDirectController
+    control = controller_type(device(model, confirmed=True), recording_dir=tmp_path)
+
+    async def run():
+        await control._connect()
+        client = control.client
+        original_callback = client.on_update
+        callback_blocked, release_callback = asyncio.Event(), asyncio.Event()
+        delivered = []
+        async def delayed(value):
+            callback_blocked.set()
+            await release_callback.wait()
+            result = original_callback(value)
+            if inspect.isawaitable(result):
+                await result
+            delivered.append(value)
+        client.on_update = delayed
+        try:
+            original = client.get_property(name).value
+            radio.peer.notify_property(200, *pair, *encode_value(original, format))
+            await asyncio.wait_for(callback_blocked.wait(), 1)
+            add(radio.peer, *pair, invalid, format)
+            before = len(radio.peer.requests)
+            with pytest.raises(DirectError):
+                await control._set(name, target)
+            assert not release_callback.is_set()
+            assert not any(op == 0 for op, _, _ in requested_from(radio.peer.requests[before:]))
+            row = control.snapshot()["properties"][name]
+            assert row["status"] == "invalid_value" and row["value"] == invalid
+            assert client.get_property(name).status == "invalid_value"
+            assert not any(item["kind"] == "setting_verified" for item in control.snapshot()["diagnostics"])
+            # Older queued read callbacks must not overwrite the invalid cache
+            # synchronized by _set, even after the callback worker resumes.
+            release_callback.set()
+            await until(lambda: any(value.name == name and value.status == "invalid_value" for value in delivered))
+            row = control.snapshot()["properties"][name]
+            assert row["status"] == "invalid_value" and row["value"] == invalid
+            assert any(value.name == name and value.status == "read" for value in delivered)
+        finally:
+            release_callback.set()
+            await control._disconnect()
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
 def requested_from(messages):
     return [(p[4], p[6], int.from_bytes(p[7:9], "little")) for p in messages if p[4] != 0xF0]
 

@@ -92,6 +92,14 @@ def test_distribution_metadata_has_version_license_bounded_core_and_independent_
     assert not any(item.name in {"paho-mqtt", "homeassistant"} for item in requirements)
     proxy = {item.name for item in requirements if item.marker and item.marker.evaluate({"extra": "proxy"})}
     assert proxy == {"bleak-esphome", "aioesphomeapi"}
+    # The suite builds with --no-isolation, so fresh environments must receive
+    # the declared backend in the test extra, not only in pip's build sandbox.
+    import tomllib
+    backend = {Requirement(value).name: str(Requirement(value).specifier)
+               for value in tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["build-system"]["requires"]}
+    test_dependencies = {item.name: str(item.specifier) for item in requirements
+                         if item.marker and item.marker.evaluate({"extra": "test"})}
+    assert all(test_dependencies.get(name) == specifier for name, specifier in backend.items())
 
 
 def test_wheel_imports_without_site_packages_or_application_side_effects(distributions, tmp_path):

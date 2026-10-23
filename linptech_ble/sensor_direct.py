@@ -147,7 +147,11 @@ class SensorDirectController(DirectController):
         prop.validate(value)
         if self.state["properties"][name]["status"] != "read":
             raise DirectError("此屬性沒有本次連線的有效讀值。")
-        observed = await client.set(name, value)
+        try:
+            observed = await client.set(name, value)
+        except BaseException:
+            self._sync_client_property(client, name)
+            raise
         if self.client is not client:
             raise DirectError("直連已變更，請重新讀取。")
         self._accept(observed)

@@ -24,4 +24,16 @@ This radar-mode smoke did not validate independent PIR energy. KS2BB/HS3BB refac
 
 All four advertisement keys were previously verified with MIC-authenticated packets. A session without a new battery report does not refresh the historical battery value. Physical ESP32 transport and complete Home Assistant deployment have not been tested.
 
+## ES5BB session-start ordering
+
+A later read-only diagnosis observed an authenticated operation-4 property notification before the BLE Spec `0xF0` session-start echo. The former first-message-only check rejected this valid ordering. The library now strictly validates and buffers initial properties, publishing them only after an exact echo with the expected transaction ID. Startup is bounded to eight seconds and 64 messages; malformed data, invalid MICs, counter rollback and wrong acknowledgements still fail. Exact retransmissions are not decoded twice.
+
+A physical authentication probe reproduced the early operation-4 ordering after the fix and completed authentication, then disconnected. Separate rapid connection attempts still timed out; this is not evidence that all radio/connection failures are resolved. The receiver observed roughly -81 to -89 dBm during this diagnosis, and the current firmware version was not freshly obtained.
+
+The same diagnosis received occupancy, close-range, illuminance and battery broadcasts with existing credentials. Seventeen valid writable settings matched earlier successful readings: no persistent setting drift was found. The configured detection region covered 0-4.5 m, vacancy delay was 30 seconds and close-range interest reporting was disabled. Radar data had threshold crossings in enabled 3.25-4.25 m bins while the device reported occupied; this alone does not establish whether the room was physically empty or whether calibration fits the environment. No calibration or persistent setting write was performed.
+
+A subsequent bounded public-client trial polled occupancy every three seconds while streaming radar. With the user leaving the full detection area for at least 60 seconds and returning, it observed occupied -> clear at 17:31:32 local time -> occupied at 17:32:37. The clear sample had an occupied-region bitmap of zero; the return sample included a PIR trigger and nonzero occupied regions. This validates the tested transition, not all household conditions or a universal clearing time.
+
+That trial completed 54 occupancy reads. All five selected writable settings were freshly reread unchanged at exit; the stream context stopped and the client disconnected. No calibration or persistent setting writes were issued.
+
 The public inventory separates observed advertisements, protocol-only fields, readable settings and restored writes. See [capabilities](DEVICE_CAPABILITIES.md) and the [validation overview](VALIDATION.md). Private captures and original-value backups are not distributed.

@@ -1,6 +1,6 @@
 # Validation overview
 
-Version **0.4.0 passed 672 tests** on Windows on 2026-10-23 (59.93 seconds). This includes public-client integration, encrypted peers, threshold commit guards, cancellation/backup recovery, distribution, per-address controls, receiver-aware RSSI history, GUI inventory/discovery, credential-update transactions, drawer controls and HA inventory synchronization. The earlier 0.3.0 baseline had 479 tests. See [development tools](DEVTOOLS.md) to rerun the source suite.
+Version **0.4.0 passed 682 tests** on Windows on 2026-10-23 (62.59 seconds). This includes public-client integration, encrypted peers, threshold commit guards, cancellation/backup recovery, distribution, per-address controls, receiver-aware RSSI history, GUI inventory/discovery, credential-update transactions, drawer controls, HA inventory synchronization and authenticated notifications arriving before the session-start acknowledgement. The earlier 0.3.0 baseline had 479 tests. See [development tools](DEVTOOLS.md) to rerun the source suite.
 
 | Layer | Evidence | Limit |
 | --- | --- | --- |

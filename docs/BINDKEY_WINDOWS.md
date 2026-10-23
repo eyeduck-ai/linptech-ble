@@ -13,6 +13,8 @@ These credentials are not interchangeable. A generic cloud `TOKEN`, Windows pair
 
 If your own devices are already configured, keep using the local `sensors.local.json`. Monitoring does not require another login. The public repository and distribution do not contain credentials for physical devices.
 
+The dashboard's **Add sensor** and per-device **Name and credentials** form can save keys you already obtained. Blank fields preserve saved credentials; the browser never receives them back. Nearby scanning identifies devices and RSSI, not their keys. The dashboard currently has no cloud-login, QR-extraction or export-file import flow; the separate account-based procedure below remains necessary for new credentials.
+
 ## Obtain your own credentials
 
 Account-free scanning can identify product IDs and record encrypted advertisements. It cannot derive an arbitrary device's bindkey from those packets. No account-free extraction/activation method has been verified across all four models and firmware versions, and no universal unauthenticated GATT key-reading characteristic has been established.

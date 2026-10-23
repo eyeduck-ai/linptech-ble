@@ -31,6 +31,8 @@ def uuid16(value: int) -> str:
 UPNP, AUTH, WRITE, NOTIFY = map(uuid16, (0x10, 0x19, 0x1A, 0x1B))
 READY, OK, ACK = bytes.fromhex("00000101"), bytes.fromhex("00000100"), bytes.fromhex("00000300")
 _COUNT_LIMIT = (1 << 63) - 1
+_SESSION_START_TIMEOUT = 8
+_SESSION_START_MESSAGE_LIMIT = 64
 
 
 def _increment(counts: dict[str, int], name: str, amount: int = 1) -> None:
@@ -545,12 +547,36 @@ class StandardSession:
         if reply != b"\x21\0\0\0":
             raise DirectError("裝置拒絕直連登入；未改動綁定或設定。")
         tid = await self._send(0xF0)
-        message = await self.notify.receive(0)
-        if self.cipher.decrypt(message.payload) != build_request(tid, 0xF0):
-            raise DirectError("裝置未確認 BLE Spec 會話；此韌體格式仍待驗證。")
-        _increment(self._counts, "verified_messages")
-        _increment(self._operations, str(0xF0))
+        await self._confirm_session_start(tid)
         self.reader = asyncio.create_task(self._read_notifications())
+
+    async def _confirm_session_start(self, tid: int) -> None:
+        # ES5BB can publish authenticated properties before its F0 echo. Keep
+        # one ordered cipher consumer, preserve those updates, and require the
+        # exact acknowledgement within both a time and message-count bound.
+        expected = build_request(tid, 0xF0)
+        deadline = asyncio.get_running_loop().time() + _SESSION_START_TIMEOUT
+        startup: list[tuple[bytes, list[dict[str, Any]]]] = []
+        for _ in range(_SESSION_START_MESSAGE_LIMIT):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise DirectTimeout("等待 BLE Spec 會話確認逾時。")
+            message = await self.notify.receive(0, timeout=remaining)
+            plaintext = self._decrypt_notification(message.payload, allow_obsolete=False)
+            if plaintext is None:
+                continue
+            if plaintext == expected:
+                _increment(self._operations, str(0xF0))
+                for frame, properties in startup:
+                    if self.on_frame:
+                        self.on_frame(frame)
+                    self._report_properties(properties)
+                return
+            if len(plaintext) > 4 and plaintext[4] == 0xF0:
+                raise DirectError("裝置未確認 BLE Spec 會話；確認內容不符。")
+            properties = self._parse_notification(plaintext, report=False, emit_frame=False)
+            startup.append((plaintext, properties))
+        raise DirectError("等待 BLE Spec 會話確認時收到過多訊息。")
 
     async def _send(self, op: int, siid: int | None = None, piid: int | None = None, **values: Any) -> int:
         if self.error:
@@ -568,20 +594,29 @@ class StandardSession:
         if self.cipher is None:
             raise DirectError("尚未完成直連認證。")
         message = await self.notify.receive(0, timeout=timeout)
+        plaintext = self._decrypt_notification(message.payload)
+        return [] if plaintext is None else self._parse_notification(plaintext, report=report)
+
+    def _decrypt_notification(self, payload: bytes, *, allow_obsolete: bool = True) -> bytes | None:
+        if self.cipher is None:
+            raise DirectError("尚未完成直連認證。")
         # A device can retransmit while its transport ACK is in flight. Drop an
         # exact, already authenticated ciphertext without applying it twice.
         # An old counter with different bytes still fails the cipher's check.
-        if message.payload in self.verified_packets:
+        if payload in self.verified_packets:
             _increment(self._counts, "exact_retransmissions")
-            return []
-        if self.cipher.verify_obsolete(message.payload):
+            return None
+        if allow_obsolete and self.cipher.verify_obsolete(payload):
             self.obsolete_count = min(_COUNT_LIMIT, self.obsolete_count + 1)
             _increment(self._counts, "obsolete_messages")
-            return []
-        plaintext = self.cipher.decrypt(message.payload)
+            return None
+        plaintext = self.cipher.decrypt(payload)
         _increment(self._counts, "verified_messages")
-        self.verified_packets.append(message.payload)
-        if self.on_frame:
+        self.verified_packets.append(payload)
+        return plaintext
+
+    def _parse_notification(self, plaintext: bytes, *, report: bool, emit_frame: bool = True) -> list[dict[str, Any]]:
+        if emit_frame and self.on_frame:
             self.on_frame(plaintext)
         try:
             properties = parse_properties(plaintext)
@@ -609,11 +644,15 @@ class StandardSession:
                     _increment(self._counts, "command_value_replies")
             if operation == 4:
                 _increment(self._counts, "op4_properties")
-        if report and self.on_property:
+        if report:
+            self._report_properties(properties)
+        return properties
+
+    def _report_properties(self, properties: list[dict[str, Any]]) -> None:
+        if self.on_property:
             for prop in properties:
                 if prop["status"] == 0 and prop["available"]:
                     self.on_property(prop)
-        return properties
 
     async def _read_notifications(self) -> None:
         """One reader owns the cipher counter, even during writes and live reports."""

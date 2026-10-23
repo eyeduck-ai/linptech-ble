@@ -188,6 +188,176 @@ class Peer:
         self.notify_property(tid, siid, piid, code, raw)
 
 
+class StartupPeer(Peer):
+    """A device publishing properties while its F0 response is pending."""
+
+    def __init__(self, *, before=(), acknowledge=True, transform_ack=None):
+        super().__init__()
+        self.before = before
+        self.acknowledge = acknowledge
+        self.transform_ack = transform_ack or (lambda frame: frame)
+
+    def encrypted(self, plain):
+        if plain[4] != 0xF0:
+            return super().encrypted(plain)
+        for action in self.before:
+            action(self)
+        if self.acknowledge:
+            super().encrypted(self.transform_ack(plain))
+
+
+def startup_property(peer):
+    peer.notify_property(3, 6, 63, 0x10, b"\x02")
+
+
+def test_session_start_preserves_early_property_after_exact_ack_without_redecrypt(monkeypatch):
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+
+    async def run():
+        pushes, frames = [], []
+
+        def before_ack(peer):
+            startup_property(peer)
+            assert pushes == frames == []
+
+        peer = StartupPeer(before=(before_ack,))
+        session = StandardSession(peer, TOKEN, on_property=pushes.append, on_frame=frames.append)
+        try:
+            await session.authenticate()
+            assert len(pushes) == len(frames) == 1
+            assert (pushes[0]["siid"], pushes[0]["piid"], pushes[0]["value"], pushes[0]["operation"]) == (6, 63, 2, 4)
+            assert session.cipher.rx_counter == 1
+            assert session.diagnostics()["counts"]["op4_properties"] == 1
+            assert session.diagnostics()["plaintext_operations"] == {"4": 1, "240": 1}
+            # The next reply advances the same cipher; buffered startup data
+            # must not be decrypted again after the acknowledgement counter.
+            assert (await session.read(6, 11))["value"] == 1
+            assert session.cipher.rx_counter == 2
+        finally:
+            await session.close()
+        assert not peer.callbacks
+
+    asyncio.run(run())
+
+
+def test_session_start_skips_exact_retransmissions_and_later_ack_duplicate(monkeypatch):
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+
+    async def run():
+        peer = StartupPeer(before=(startup_property,) + (lambda p: p.emit(NOTIFY, p.last_notification),) * 3)
+        pushes = []
+        session = StandardSession(peer, TOKEN, on_property=pushes.append)
+        try:
+            await session.authenticate()
+            assert len(pushes) == 1
+            peer.emit(NOTIFY, peer.last_notification)  # Repeat the verified F0 echo.
+            assert (await session.read(6, 11))["value"] == 1
+            assert session.diagnostics()["counts"]["exact_retransmissions"] == 4
+            assert session.error is None
+        finally:
+            await session.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transform", [
+    lambda plain: build_request(2, 0xF0),
+    lambda plain: bytes([plain[0] + 1]) + plain[1:] + b"\0",
+])
+def test_session_start_rejects_mismatched_f0_without_publishing_early_data(monkeypatch, transform):
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+
+    async def run():
+        peer = StartupPeer(before=(startup_property,), transform_ack=transform)
+        pushes, frames = [], []
+        session = StandardSession(peer, TOKEN, on_property=pushes.append, on_frame=frames.append)
+        try:
+            with pytest.raises(DirectError, match="確認內容不符"):
+                await session.authenticate()
+            assert pushes == frames == [] and session.reader is None
+        finally:
+            await session.close()
+        assert not peer.callbacks and session.cipher is None and session._token == b""
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["mic", "malformed", "counter"])
+def test_session_start_authenticates_and_validates_every_early_notification(monkeypatch, failure):
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+
+    async def run():
+        def invalid(peer):
+            if failure == "malformed":
+                Peer.encrypted(peer, b"\x05\x20\0\0\x04")
+            else:
+                counter = peer.tx + 1 if failure == "mic" else peer.tx
+                packet = device_message(b"\x05\x20\0\0\xf0", counter)
+                if failure == "mic":
+                    packet = packet[:-1] + bytes([packet[-1] ^ 1])
+                peer.emit(NOTIFY, b"\0\0\x02\0" + packet)
+
+        peer = StartupPeer(before=(startup_property, invalid))
+        pushes = []
+        session = StandardSession(peer, TOKEN, on_property=pushes.append)
+        try:
+            with pytest.raises(DirectError, match={"mic": "AES-CCM", "malformed": "操作型別", "counter": "重複或倒退"}[failure]):
+                await session.authenticate()
+            assert pushes == [] and session.reader is None
+        finally:
+            await session.close()
+        assert not peer.callbacks and session.cipher is None
+
+    asyncio.run(run())
+
+
+def test_session_start_silence_uses_one_bounded_deadline_and_discards_buffer(monkeypatch):
+    from linptech_ble.standard_auth import DirectTimeout
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+    monkeypatch.setattr("linptech_ble.standard_auth._SESSION_START_TIMEOUT", .06)
+
+    async def run():
+        peer = StartupPeer(before=(startup_property,), acknowledge=False)
+        pushes = []
+        session = StandardSession(peer, TOKEN, on_property=pushes.append)
+        try:
+            await asyncio.wait_for(_expect_auth_timeout(session), 1.5)
+            assert pushes == [] and session.reader is None
+        finally:
+            await session.close()
+        assert not peer.callbacks
+
+    async def _expect_auth_timeout(session):
+        with pytest.raises(DirectTimeout):
+            await session.authenticate()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("exact_duplicates", [False, True])
+def test_session_start_notification_flood_has_message_bound(monkeypatch, exact_duplicates):
+    monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
+    monkeypatch.setattr("linptech_ble.standard_auth._SESSION_START_MESSAGE_LIMIT", 4)
+
+    async def run():
+        flood = (lambda peer: peer.emit(NOTIFY, peer.last_notification)) if exact_duplicates else startup_property
+        peer = StartupPeer(before=(startup_property,) + (flood,) * 4)
+        pushes = []
+        session = StandardSession(peer, TOKEN, on_property=pushes.append)
+        try:
+            with pytest.raises(DirectError, match="過多訊息"):
+                await asyncio.wait_for(session.authenticate(), 1.5)
+            assert pushes == [] and session.reader is None
+            counts = session.diagnostics()["counts"]
+            assert counts["verified_messages"] == (1 if exact_duplicates else 4)
+            assert counts["exact_retransmissions"] == (3 if exact_duplicates else 0)
+        finally:
+            await session.close()
+        assert not peer.callbacks
+
+    asyncio.run(run())
+
+
 def test_full_session_mutual_login_read_push_and_verified_write(monkeypatch):
     monkeypatch.setattr("linptech_ble.standard_auth.secrets.token_bytes", lambda _: APP_RANDOM)
     async def run():

@@ -13,6 +13,21 @@ const ART = {
   KS2BB: '<rect x="12" y="12" width="48" height="48" rx="15"/><circle cx="36" cy="36" r="12"/><path d="M32 36h8M36 32v8M30 66h12"/>',
   HS3BB: '<path d="M13 50V27a23 23 0 0 1 46 0v23zM19 56h34M26 62h20"/><path d="M25 36a11 11 0 0 1 22 0M30 36a6 6 0 0 1 12 0"/><circle cx="36" cy="38" r="2"/>',
 };
+function signalState(device, state, { online = true, frozen = false } = {}) {
+  const rssi = Number.isFinite(device.rssi) ? device.rssi : null;
+  const age = device.last_seen ? (Date.parse(state.server_time) - Date.parse(device.last_seen)) / 1000 : Infinity;
+  const current = online && !frozen && state.mode !== "replay" && !device.last_error &&
+    device.last_seen && Number.isFinite(age) && age >= 0 && age <= state.stale_after && rssi !== null && rssi < 0;
+  const level = current ? (rssi >= -60 ? 4 : rssi >= -75 ? 3 : rssi >= -90 ? 2 : 1) : 0;
+  const status = !online ? "主機離線" : frozen ? "畫面暫停" : state.mode === "replay" ? "歷史廣播" :
+    device.last_error ? "接收異常" : !device.last_seen ? "等待廣播" : !Number.isFinite(age) || age > state.stale_after ? "廣播過舊" : "近期廣播";
+  return { quality: ["unknown", "poor", "weak", "fair", "strong"][level], level, status, rssi, lastSeen: device.last_seen || null };
+}
+function temperatureSeries(device) {
+  return (device?.history?.temperature || [])
+    .filter(point => Number.isFinite(point.value) && Number.isFinite(Date.parse(point.timestamp)))
+    .slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+}
 let latest = null;
 let shown = null;
 let paused = false;
@@ -45,19 +60,17 @@ function reading(label, entry, unit, valueOverride) {
   node.append(el("span", "reading-label", label), el("span", "reading-value", entry ? (valueOverride ?? `${fmt(entry.value)}${unit ? " " + unit : ""}`) : "尚未上報"), el("span", "reading-age", entry ? timeText(entry.updated_at) : "—"));
   return node;
 }
-function card(device, index, state) {
-  const card = el("article", `sensor-card${device.model === "ES5BB" ? " featured" : ""}`);
-  card.dataset.model = device.model;
-  card.setAttribute("aria-label", `${device.model} ${TYPES[device.model] || device.name}`);
+function cardFront(device, index, state) {
+  const front = el("div", "card-front");
   const top = el("div", "card-top");
   const title = el("div");
   const model = el("h3", "model-line", device.model);
   model.prepend(el("span", "sensor-number", String(index + 1).padStart(2, "0")));
   title.append(model, el("p", "card-type", TYPES[device.model] || device.name));
   title.title = device.name;
-  const freshness = device.last_error ? "failed" : device.freshness;
-  const freshText = device.last_error ? "接收異常" : ({ recent: "近期有廣播", waiting: "等待廣播", stale: "較久未更新" }[freshness]);
-  top.append(title, el("span", `freshness ${freshness}`, freshText));
+  const signal = signalState(device, state, { online: connected, frozen: paused });
+  const freshness = device.last_error ? "failed" : (signal.level ? "recent" : "waiting");
+  top.append(title, el("span", `freshness ${freshness}`, signal.status));
   const main = el("div", "card-main");
   const primary = el("div");
   let source = null, value = "等待資料", unit = "";
@@ -69,6 +82,7 @@ function card(device, index, state) {
   const unknown = ["ES5BB", "HS3BB"].includes(device.model) && unconfirmed(source, state);
   if (unknown) value = "未確認";
   const big = el("p", `primary-value${source && !unknown ? "" : " missing"}`, value);
+  big.dataset.state = !source || unknown ? "unknown" : typeof source.value === "boolean" ? (source.value ? "active" : "clear") : "clear";
   if (unit) big.append(el("span", "value-unit", unit));
   primary.append(big, el("p", "primary-updated", unknown ? `最後回報：${lastValue} · ${timeText(source.updated_at)}` : updated(source)));
   const art = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -91,9 +105,6 @@ function card(device, index, state) {
     readings.append(reading("環境照度", metric(device, "illuminance"), "lux"), reading("電池電量", metric(device, "battery"), "%"));
   } else {
     readings.append(reading("電池電量", metric(device, "battery"), "%"));
-    const verification = el("div", "reading");
-    verification.append(el("span", "reading-label", "本次解密"), el("span", "reading-value", device.verified ? "已驗證" : (device.key_configured ? "等待驗證" : "未設定密鑰")), el("span", "reading-age", device.last_decoded ? timeText(device.last_decoded) : "—"));
-    readings.append(verification);
   }
   if (["ES5BB", "KS2BB"].includes(device.model)) readings.append(reading("電池電量", metric(device, "battery"), "%"));
   // Show additional reported fields too, without manufacturing unreported data.
@@ -104,13 +115,72 @@ function card(device, index, state) {
   for (const entry of Object.values(device.binary_sensors)) {
     if (!visible.has(entry.key)) readings.append(reading(FIELD_NAMES[entry.key] || entry.key, entry, "", entry.value ? "觸發" : "未觸發"));
   }
-  const meta = el("div", "card-meta");
-  meta.append(el("span", "", `RSSI ${device.rssi === null ? "—" : device.rssi + " dBm"}`), el("span", "", `廣播 ${ago(device.last_seen, state.server_time)}`));
-  meta.title = `MAC ${device.address}；已接收 ${device.packets} 包，成功解析 ${device.decoded} 包`;
-  card.append(top, main, readings, meta);
-  if (device.model === "ES5BB") card.append(el("p", "card-caption", "離開後需等待裝置回報無人；雷達與設定請見下方直連工作台。"));
-  if (device.last_error) card.append(el("p", "card-error", device.last_error));
-  return card;
+  const reception = el("div", "signal-indicator"); reception.dataset.quality = signal.quality;
+  const bars = el("span", "signal-bars"); bars.setAttribute("aria-hidden", "true");
+  for (let i = 1; i <= 4; i++) bars.append(el("i", i <= signal.level ? "lit" : ""));
+  const copy = el("div", "signal-copy");
+  const strength = { strong: "訊號強", fair: "訊號穩定", weak: "訊號偏弱", poor: "訊號微弱", unknown: signal.status }[signal.quality];
+  copy.append(el("strong", "signal-label", strength), el("span", "signal-age", signal.lastSeen ? `最後廣播 ${ago(signal.lastSeen, state.server_time)}` : "尚未收到廣播"));
+  const number = el("span", "signal-number", signal.rssi === null ? "— dBm" : `${signal.rssi} dBm${signal.level ? "" : " · 上次"}`);
+  reception.title = "RSSI 為最後一筆藍牙廣播的接收強度；不代表感測值新鮮度或直連訊號。";
+  reception.append(bars, copy, number);
+  front.append(top, main, readings, reception);
+  if (device.last_error) front.append(el("p", "card-error", device.last_error));
+  return front;
+}
+const cardNodes = new Map();
+let cardLayout = "";
+function ensureCards(state) {
+  const grid = $("sensor-grid");
+  const layout = state.devices.map(device => `${device.address}:${device.model}`).join("|");
+  if (layout !== cardLayout) {
+    // Keep the original controls and their event bindings even when a host
+    // restarts with a different device list. Never discard mounted panels.
+    for (const id of ["direct-section", "temperature-panel", "KS2BB-sensor-panel", "HS3BB-sensor-panel", "MS1BB-sensor-panel"]) {
+      if ($(id)) $("panel-staging").append($(id));
+    }
+    grid.replaceChildren(); cardNodes.clear(); cardLayout = layout;
+  }
+  const retained = new Set();
+  state.devices.forEach((device, index) => {
+    retained.add(device.address);
+    let card = cardNodes.get(device.address);
+    if (!card) {
+      card = el("article", "sensor-card"); card.dataset.model = device.model;
+      card.setAttribute("aria-label", `${device.model} ${TYPES[device.model] || device.name}`);
+      card.append(cardFront(device, index, state));
+      const ownsPanel = state.devices.find(item => item.model === device.model).address === device.address;
+      if (device.model === "KS2BB" && ownsPanel) card.append($("temperature-panel"));
+      const details = el("details", "device-advanced"); details.id = `advanced-${device.model}${ownsPanel ? "" : `-${index}`}`;
+      const summary = el("summary");
+      const label = el("span", "advanced-label", "進階設定");
+      label.append(el("span", "visually-hidden", ` · ${device.model}`));
+      const status = el("span", "advanced-status", "未直連");
+      summary.append(label, status);
+      const host = el("div", "advanced-content");
+      const panel = device.model === "ES5BB" ? $("direct-section") : $(`${device.model}-sensor-panel`);
+      if (panel && ownsPanel) host.append(panel);
+      else if (!ownsPanel) host.append(el("p", "direct-note", "直連控制使用同型號第一台已設定裝置。"));
+      const diagnostic = el("details", "card-decode"); diagnostic.append(el("summary", "", "廣播解析明細"));
+      const objects = el("div", "decode-device");
+      diagnostic.append(objects); host.append(diagnostic); details.append(summary, host); card.append(details);
+      grid.append(card); cardNodes.set(device.address, card);
+    }
+  });
+  for (const [address, node] of cardNodes) if (!retained.has(address)) { node.remove(); cardNodes.delete(address); }
+}
+function renderCards(state) {
+  ensureCards(state);
+  state.devices.forEach((device, index) => {
+    const card = cardNodes.get(device.address);
+    card.querySelector(".card-front").replaceWith(cardFront(device, index, state));
+    const d = device.model === "ES5BB" ? state.direct : state.sensor_direct?.[device.model];
+    const text = state.mode === "replay" ? "重播模式" : device.model === "MS1BB" ? "廣播資料" :
+      d?.calibration?.restore_required ? "需要還原" : !connected ? "主機離線" :
+      d?.busy ? "處理中" : d?.authenticated ? (d.streaming?.radar_active ? "雷達即時" : "已直連") : "未直連";
+    const badge = card.querySelector(".advanced-status"); badge.textContent = text;
+    badge.dataset.state = d?.calibration?.restore_required ? "error" : d?.authenticated && connected ? "active" : "idle";
+  });
 }
 function renderFeed(state) {
   const kind = $("event-kind").value;
@@ -477,17 +547,15 @@ $("direct-settings").addEventListener("submit", (event) => {
 });
 function renderTrend(state) {
   const device = state.devices.find((item) => item.model === "KS2BB");
-  $("trend-temp").replaceChildren(document.createTextNode(fmt(metric(device, "temperature")?.value)), el("small", "", " °C"));
-  $("trend-humidity").replaceChildren(document.createTextNode(fmt(metric(device, "humidity")?.value)), el("small", "", " %"));
-  const points = (device?.history.temperature || []).filter((point) => Number.isFinite(point.value));
+  const points = temperatureSeries(device);
   const chart = $("trend-chart");
   chart.replaceChildren();
   [20, 65, 110].forEach((y) => chart.append(svgEl("line", { x1: 40, y1: y, x2: 780, y2: y, stroke: "#dce0d3", "stroke-dasharray": "3 5" })));
   if (!points.length) {
     chart.append(svgEl("text", { x: 410, y: 70, "text-anchor": "middle", fill: "#687169", "font-size": 13 }, "等待第一筆溫度廣播"));
     chart.setAttribute("aria-label", "本次溫度趨勢，尚無資料");
-    $("trend-range").textContent = "等待 KS2BB 溫度廣播";
-    $("trend-caption").textContent = "收到實際溫度資料後繪製；不補值、不推算。";
+    $("trend-range").textContent = "本次監聽";
+    $("trend-caption").textContent = "等待溫度廣播";
     return;
   }
   const low = Math.min(...points.map((p) => p.value)), high = Math.max(...points.map((p) => p.value));
@@ -498,65 +566,71 @@ function renderTrend(state) {
   mapped.forEach((p, i) => { const circle = svgEl("circle", { cx: p.x, cy: p.y, r: i === mapped.length - 1 ? 4 : 2, fill: "#3b6850" }); circle.append(svgEl("title", {}, `${timeText(points[i].timestamp)} · ${fmt(points[i].value)} °C`)); chart.append(circle); });
   chart.append(svgEl("text", { x: 2, y: 24, fill: "#687169", "font-size": 10 }, fmt(max)), svgEl("text", { x: 2, y: 114, fill: "#687169", "font-size": 10 }, fmt(min)));
   $("trend-range").textContent = `${timeText(points[0].timestamp)} — ${timeText(points.at(-1).timestamp)}`;
-  $("trend-caption").textContent = `溫度範圍 ${fmt(low)}–${fmt(high)} °C · 最近 ${points.length} 筆廣播讀值（最多 180 筆）。數值更新也可在即時紀錄中查閱。`;
+  $("trend-caption").textContent = `${fmt(low)}–${fmt(high)} °C · ${points.length} 筆實際讀值`;
   chart.setAttribute("aria-label", `溫度趨勢：${points.length} 筆讀值，最低 ${fmt(low)}，最高 ${fmt(high)} 攝氏度；最新 ${fmt(points.at(-1).value)} 攝氏度`);
 }
-let sensorSignature = "", sensorDirty = false, sensorSession = null;
+let sensorSession = null;
+const SENSOR_MODELS = ["KS2BB", "HS3BB", "MS1BB"];
 const sensorOperations = new Map();
 function sensorOperation(model) {
-  if (!sensorOperations.has(model)) sensorOperations.set(model, { posting: false, pending: null, pendingSince: 0, pendingSnapshot: 0, completed: null, feedback: "" });
+  if (!sensorOperations.has(model)) sensorOperations.set(model, { posting: false, pending: null, pendingSince: 0, pendingSnapshot: 0, completed: null, feedback: "", signature: "", dirty: false });
   return sensorOperations.get(model);
 }
+function sensorUi(model, id) { return $(`${model}-${id}`); }
 function renderSensorSettings(state) {
-  if (sensorSession !== state.started_at) { sensorSession = state.started_at; sensorOperations.clear(); sensorSignature = ""; sensorDirty = false; }
-  const model = $("sensor-model").value, d = state.sensor_direct?.[model], op = sensorOperation(model);
+  if (sensorSession !== state.started_at) { sensorSession = state.started_at; sensorOperations.clear(); }
+  SENSOR_MODELS.forEach(model => renderSensorPanel(model, state));
+}
+function renderSensorPanel(model, state) {
+  const ui = id => sensorUi(model, id), d = state.sensor_direct?.[model], op = sensorOperation(model);
   if (op.pending && d?.last_operation?.id === op.pending && d.last_operation.status !== "pending") { op.pending = null; op.feedback = ""; }
   if (op.pending && d?.last_operation?.id !== op.pending && !d?.busy &&
       Date.now() - op.pendingSince > 2000 && new Date(state.server_time).getTime() > op.pendingSnapshot) {
     op.pending = null; op.feedback = "操作紀錄已被較新操作取代，請重新讀取設定確認。";
   }
-  if (d?.last_operation?.status === "done" && d.last_operation.id !== op.completed) { op.completed = d.last_operation.id; sensorDirty = false; }
+  if (d?.last_operation?.status === "done" && d.last_operation.id !== op.completed) { op.completed = d.last_operation.id; op.dirty = false; }
   const locked = !connected || paused || state.mode === "replay" || op.posting || Boolean(op.pending) || d?.busy || !d;
-  $("sensor-model").disabled = op.posting || Boolean(op.pending);
-  $("sensor-connect").disabled = locked || !d?.supported || !d.token_configured || d.authenticated;
-  $("sensor-refresh").disabled = locked || !d?.authenticated;
-  $("sensor-disconnect").disabled = locked || !d?.authenticated;
-  setText("sensor-settings-status", op.feedback || d?.error || (d ? `${DIRECT_STATUS[d.status] || d.status}${d.last_operation ? ` · ${{ pending: "操作進行中", done: "操作完成", error: "操作失敗" }[d.last_operation.status] || ""}` : ""}` : "離線重播或尚未設定此感測器"));
-  setText("sensor-settings-note", d ? `${d.note}${!d.token_configured && d.supported ? " 尚未設定直連 token，可用 set-token 指令保存；bindkey 無法代替。" : ""}${d.model_confirmed === false ? " 寫入前須確認協定型號 linp.motion.hs1bb2，並在本機設定 miot_model。" : ""}` : "即時模式才可連接；不會將歷史資料寫回裝置。");
+  ui("sensor-connect").disabled = locked || !d?.supported || !d.token_configured || d.authenticated;
+  ui("sensor-refresh").disabled = locked || !d?.authenticated;
+  ui("sensor-disconnect").disabled = locked || !d?.authenticated;
+  ui("sensor-panel").querySelector(".stream-settings").hidden = model === "MS1BB";
+  ui("sensor-settings-form").hidden = model === "MS1BB";
+  ui("sensor-settings-status").textContent = op.feedback || d?.error || (model === "MS1BB" ? "僅廣播 · 無開放的直連設定" : d ? `${DIRECT_STATUS[d.status] || d.status}${d.last_operation ? ` · ${{ pending: "操作進行中", done: "操作完成", error: "操作失敗" }[d.last_operation.status] || ""}` : ""}` : "重播模式 · 直連停用");
+  ui("sensor-settings-note").textContent = d ? `${model === "HS3BB" ? "短按裝置按鈕後立即連線。 " : ""}${d.note}${!d.token_configured && d.supported ? " 缺少直連 token，請使用 set-token 保存。" : ""}${d.model_confirmed === false ? " 寫入前須核對協定型號 linp.motion.hs1bb2。" : ""}` : "重播資料不會寫入裝置。";
   const catalog = Object.entries(d?.properties || {});
   const catalogSignature = `${model}:${catalog.map(([name]) => name).join(",")}`;
-  if ($("sensor-property").dataset.catalog !== catalogSignature) {
-    $("sensor-property").dataset.catalog = catalogSignature;
-    $("sensor-property").replaceChildren(...catalog.map(([name, p]) => new Option(p.label, name)));
-    sensorSignature = ""; sensorDirty = false;
+  if (ui("sensor-property").dataset.catalog !== catalogSignature) {
+    ui("sensor-property").dataset.catalog = catalogSignature;
+    ui("sensor-property").replaceChildren(...catalog.map(([name, p]) => new Option(p.label, name)));
+    op.signature = ""; op.dirty = false;
   }
-  const name = $("sensor-property").value, prop = d?.properties?.[name];
+  const name = ui("sensor-property").value, prop = d?.properties?.[name];
   const signature = `${model}:${name}`;
-  if (signature !== sensorSignature) {
-    sensorSignature = signature; sensorDirty = false;
+  if (signature !== op.signature) {
+    op.signature = signature; op.dirty = false;
     const choice = prop?.choices?.length || prop?.format === "bool", input = el(choice ? "select" : "input");
-    input.id = "sensor-value"; input.name = "value"; input.required = true;
-    input.setAttribute("aria-describedby", "sensor-current");
+    input.id = `${model}-sensor-value`; input.name = "value"; input.required = true;
+    input.setAttribute("aria-describedby", `${model}-sensor-current`);
     if (choice) {
       input.append(new Option("請選擇", ""));
       if (prop.format === "bool") input.append(new Option("停用", "false"), new Option("啟用", "true"));
       else prop.choices.forEach((label, index) => input.append(new Option(label, String(index))));
     } else { input.type = "number"; input.step = String(prop?.step || 1); if (prop?.minimum !== null && prop?.minimum !== undefined) input.min = String(prop.minimum); if (prop?.maximum !== null && prop?.maximum !== undefined) input.max = String(prop.maximum); }
-    $("sensor-value-slot").replaceChildren(input);
+    ui("sensor-value-slot").replaceChildren(input);
   }
-  const input = $("sensor-value"), ready = !locked && d?.authenticated && d.status === "ready" && d.model_confirmed !== false;
-  if (!sensorDirty && document.activeElement !== input) input.value = prop?.value === null || prop?.value === undefined ? "" : String(prop.value);
+  const input = ui("sensor-value"), ready = !locked && d?.authenticated && d.status === "ready" && d.model_confirmed !== false;
+  if (!op.dirty && document.activeElement !== input) input.value = prop?.value === null || prop?.value === undefined ? "" : String(prop.value);
   input.disabled = !ready || prop?.status !== "read";
-  $("sensor-property").disabled = locked || !catalog.length;
-  $("sensor-apply").disabled = input.disabled || !sensorDirty;
-  setText("sensor-current", prop ? `目前值：${propertyText(prop)}${prop.unit ? ` ${prop.unit}` : ""} · ${prop.updated_at ? timeText(prop.updated_at) : "尚未讀取"}${prop.status !== "read" ? ` · ${prop.status}` : ""}` : "正式版規格沒有可開放的直連設定。");
-  $("sensor-properties").replaceChildren(...catalog.map(([, p]) => {
+  ui("sensor-property").disabled = locked || !catalog.length;
+  ui("sensor-apply").disabled = input.disabled || !op.dirty;
+  ui("sensor-current").textContent = prop ? `目前值：${propertyText(prop)}${prop.unit ? ` ${prop.unit}` : ""} · ${prop.updated_at ? timeText(prop.updated_at) : "尚未讀取"}${prop.status !== "read" ? ` · ${prop.status}` : ""}` : "沒有可調整的直連設定";
+  ui("sensor-properties").replaceChildren(...catalog.map(([, p]) => {
     const row = el("div"), value = el("dd", "", `${propertyText(p)}${p.unit ? ` ${p.unit}` : ""}`);
     value.append(el("small", "", `${p.siid}.${p.piid} · ${p.status}${p.error ? ` · ${p.error}` : ""}`)); row.append(el("dt", "", p.label), value); return row;
   }));
 }
-async function sensorRequest(command) {
-  const model = $("sensor-model").value, op = sensorOperation(model);
+async function sensorRequest(model, command) {
+  const op = sensorOperation(model);
   if (op.posting || op.pending || paused || !connected) return;
   const requestSession = latest?.started_at;
   op.posting = true; op.feedback = "正在送出要求…"; renderSensorSettings(latest);
@@ -569,21 +643,27 @@ async function sensorRequest(command) {
   } catch (error) { op.feedback = error.name === "TimeoutError" ? "送出逾時，請先查看操作結果。" : error.message; }
   finally { op.posting = false; renderSensorSettings(latest); }
 }
-$("sensor-model").addEventListener("change", () => { sensorSignature = ""; if (latest) renderSensorSettings(latest); });
-$("sensor-property").addEventListener("change", () => { sensorSignature = ""; if (latest) renderSensorSettings(latest); });
-$("sensor-value-slot").addEventListener("input", () => { sensorDirty = true; if (latest) renderSensorSettings(latest); });
-$("sensor-connect").addEventListener("click", () => sensorRequest({ action: "connect" }));
-$("sensor-refresh").addEventListener("click", () => sensorRequest({ action: "refresh" }));
-$("sensor-disconnect").addEventListener("click", () => sensorRequest({ action: "disconnect" }));
-$("sensor-settings-form").addEventListener("submit", event => {
-  event.preventDefault(); const input = $("sensor-value"), prop = latest?.sensor_direct?.[$("sensor-model").value]?.properties?.[$("sensor-property").value];
-  if ($("sensor-apply").disabled || !prop || !input.reportValidity()) return;
-  sensorRequest({ action: "set", property: $("sensor-property").value, value: prop.format === "bool" ? input.value === "true" : Number(input.value) });
-});
+for (const model of SENSOR_MODELS) {
+  const content = $("sensor-settings-template").content.cloneNode(true);
+  content.querySelectorAll("[id]").forEach(node => { node.id = `${model}-${node.id}`; });
+  content.querySelectorAll("[for]").forEach(node => { node.htmlFor = `${model}-${node.htmlFor}`; });
+  $("panel-staging").append(content);
+  const ui = id => sensorUi(model, id);
+  ui("sensor-property").addEventListener("change", () => { sensorOperation(model).signature = ""; if (latest) renderSensorSettings(latest); });
+  ui("sensor-value-slot").addEventListener("input", () => { sensorOperation(model).dirty = true; if (latest) renderSensorSettings(latest); });
+  ui("sensor-connect").addEventListener("click", () => sensorRequest(model, { action: "connect" }));
+  ui("sensor-refresh").addEventListener("click", () => sensorRequest(model, { action: "refresh" }));
+  ui("sensor-disconnect").addEventListener("click", () => sensorRequest(model, { action: "disconnect" }));
+  ui("sensor-settings-form").addEventListener("submit", event => {
+    event.preventDefault(); const input = ui("sensor-value"), prop = latest?.sensor_direct?.[model]?.properties?.[ui("sensor-property").value];
+    if (ui("sensor-apply").disabled || !prop || !input.reportValidity()) return;
+    sensorRequest(model, { action: "set", property: ui("sensor-property").value, value: prop.format === "bool" ? input.value === "true" : Number(input.value) });
+  });
+}
 function renderObjects(state) {
   const statusLabels = { decoded: "已解析", unknown_object: "未知物件", unknown_enum: "未知列舉", outside_spec_range: "超出規格", unauthenticated: "未認證" };
-  $("decode-objects").replaceChildren(...state.devices.map(device => {
-    const section = el("section", "decode-device"); section.append(el("h3", "", device.model));
+  state.devices.forEach(device => {
+    const section = cardNodes.get(device.address).querySelector(".decode-device"); section.replaceChildren();
     const objects = Object.values(device.objects || {});
     if (!objects.length) section.append(el("p", "", "本輪尚未收到可列出的物件。"));
     for (const item of objects) {
@@ -591,8 +671,7 @@ function renderObjects(state) {
       const miot = item.miot ? ` · ${item.miot.siid}.${item.miot.piid ?? `e${item.miot.eiid}`}` : "";
       section.append(el("p", "decode-object", `${item.object_id_hex} · ${item.label || item.key || "未識別欄位"}${miot} · ${value} · ${statusLabels[item.status] || item.status} · ${timeText(item.updated_at)}`));
     }
-    return section;
-  }));
+  });
 }
 function render(state) {
   shown = state;
@@ -600,9 +679,9 @@ function render(state) {
   $("verified-devices").textContent = `${state.totals.verified} / ${state.devices.length}`;
   $("packet-count").textContent = state.totals.packets.toLocaleString("zh-TW");
   $("event-count").textContent = state.totals.events.toLocaleString("zh-TW");
-  $("sensor-grid").replaceChildren(...state.devices.map((device, index) => card(device, index, state)));
+  renderCards(state);
   renderFeed(state); renderTrend(state); renderDirect(state); renderSensorSettings(state); renderObjects(state);
-  $("recording-info").textContent = state.mode === "replay" ? "離線重播 · 保留原始封包時間" : "完整廣播與事件持續存入 captures 資料夾";
+  $("recording-info").textContent = state.mode === "replay" ? "歷史重播" : "紀錄中 · captures/";
   const newest = state.events[0];
   if (initializedSession !== state.started_at) { initializedSession = state.started_at; lastAnnouncedId = newest?.id || 0; }
   if (newest && newest.id > lastAnnouncedId) { $("announcer").textContent = `${newest.model}，${newest.text}`; lastAnnouncedId = newest.id; }
@@ -619,16 +698,17 @@ function renderConnection() {
   const bridgeText = [viaProxy ? `接收代理：${latest.transport.proxy_names?.join("、") || "等待設定"} · ES5BB 直連：${latest.transport.gatt_proxy || "請指定代理"}` : "本機藍牙接收", `HA MQTT：${mqtt?.enabled ? mqttStatus : "未啟用"}`].join(" ｜ ");
   $("bridge-status").hidden = !viaProxy && !mqtt?.enabled;
   setText("bridge-status", `${!connected ? "主機連線中斷 · 最後設定：" : ""}${bridgeText}${mqtt?.error ? ` · ${mqtt.error}` : ""}`);
-  setText("direct-guide", `將 ES5BB 放近${viaProxy ? "選定的 ESPHome 代理" : "電腦"}，離開手機米家的裝置頁並暫時關閉手機藍牙；iPhone 請從「設定 → 藍牙」關閉。按「連接 ES5BB」後立即單擊感測器實體按鍵，保持供電；請勿長按重設。`);
+  setText("direct-guide", `保持供電並放近${viaProxy ? "ESPHome 代理" : "電腦"}。從手機設定關閉藍牙，短按裝置按鍵後連線；請勿長按重設。`);
   const message = !connected ? "網頁與本機程式的連線中斷；畫面保留最後收到的資料，連線恢復後會自動同步。" : (latest?.scanner.error || (paused ? "畫面已暫停；後台持續接收並保存廣播。按「繼續顯示」即可同步最新狀態。" : (latest?.mode === "replay" ? "這是歷史廣播的離線重播，時間與數值不代表裝置目前狀態。" : "")));
   $("notice").textContent = message; $("notice").hidden = !message;
   $("notice").className = `notice${!connected || status === "error" ? " error" : ""}`;
   directAvailability();
+  if (shown || latest) renderCards(paused && shown ? shown : latest);
   if (latest) renderSensorSettings(paused && shown ? shown : latest);
   const direct = paused && shown ? shown.direct : latest?.direct;
   if (direct) { renderPirEnergy(direct); renderSignals(direct); }
 }
-function receive(state) { latest = state; connected = true; renderConnection(); if (!paused) render(state); }
+function receive(state) { latest = state; connected = true; ensureCards(state); renderConnection(); if (!paused) render(state); }
 $("pause-button").addEventListener("click", () => {
   paused = !paused;
   $("pause-button").setAttribute("aria-pressed", String(paused));

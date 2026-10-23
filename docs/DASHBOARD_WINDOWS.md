@@ -23,6 +23,10 @@ Default startup:
 
 ## Test the sensors
 
+Each sensor card shows its latest reported state, field timestamps, advertisement age and RSSI bars. All cards use the same background; color accents indicate state or signal quality. Old or unavailable radio readings have inactive bars and an explicit label. RSSI does not refresh a sensor value or prove a GATT connection.
+
+KS2BB's temperature history is embedded in its card. It plots up to 180 actual decoded readings with their original timestamps; it does not fill silent periods with invented readings.
+
 Place the sensors near the receiver. Close their Xiaomi Home control pages; for GATT tests, turn off the phone's Bluetooth in system settings to release the connection.
 
 | Sensor | Test action | Expected observations |
@@ -40,7 +44,7 @@ Pausing the display does not stop reception or recording. Export downloads the c
 
 ## Advanced GATT controls
 
-Use the relevant connection button after preparing the sensor and its separate 12-byte Standard Auth token. A visible advertisement is not proof that the device is currently connectable.
+Open the **advanced settings** menu in the relevant sensor card for its connection, settings and advertisement diagnostics. ES5BB's menu also contains radar, PIR, regions and calibration. Opening or closing a menu sends no device command. Prepare the sensor and its separate 12-byte Standard Auth token before connecting; a visible advertisement is not proof that the device is currently connectable.
 
 - **ES5BB:** a connection authenticates, reads the catalog and requests the radar stream automatically. See [ES5 advanced controls](ES5BB_ADVANCED.md) for regions, sensitivity, PIR and calibration limits.
 - **KS2BB:** connect to read button mode and display temperature unit. Setting changes require explicit actions and verified readback.

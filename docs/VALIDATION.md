@@ -1,6 +1,6 @@
 # Validation overview
 
-Version **0.4.0 passed 505 tests** on Windows on 2026-10-23 (51.53 seconds). This includes the Dashboard-to-public-client migration, encrypted synthetic peers, threshold commit guards, cancellation/backup recovery and distribution checks. The earlier 0.3.0 baseline had 479 tests. See [development tools](DEVTOOLS.md) to rerun the source suite.
+Version **0.4.0 passed 521 tests** on Windows on 2026-10-23 (53.75 seconds). This includes public-client integration, encrypted synthetic peers, threshold commit guards, cancellation/backup recovery, distribution checks and 16 radio-status/temperature-history tests. The earlier 0.3.0 baseline had 479 tests. See [development tools](DEVTOOLS.md) to rerun the source suite.
 
 | Layer | Evidence | Limit |
 | --- | --- | --- |
@@ -14,5 +14,7 @@ Version **0.4.0 passed 505 tests** on Windows on 2026-10-23 (51.53 seconds). Thi
 Writes under test were followed by independent readback and restoration. The latest ES5BB matrix verified all 24 valid original settings at exit; HS3BB's wake experiment was read-only. No reset or firmware update was performed.
 
 The later ES5BB Dashboard smoke used only temporary stream controls, with no persistent setting changes or calibration. Of 17 baseline setting values, 15 were freshly reread unchanged; optional `pir_threshold` and `indicator_light` were not freshly reread. It ended disconnected, with streaming off and no restoration pending. See the [hardware evidence](HARDWARE_VALIDATION_2026-10-23.md).
+
+The redesigned UI was checked in the live browser and an isolated synthetic server: per-device drafts survive updates, KS2BB/HS3BB commands retain their model, menu toggles send no command, pause/replay disable editing, and device-list changes preserve controls. These UI checks made no physical setting changes.
 
 Details: [hardware](HARDWARE_VALIDATION_2026-10-23.md), [ES5BB earlier session](ES5BB_DIRECT_VALIDATION_2026-10-22.md), [PIR](PIR_INVESTIGATION.md), [HS3BB wake](HS3BB_WAKE.md), [proxy simulation](PROXY_HA_VALIDATION_2026-10-22.md).

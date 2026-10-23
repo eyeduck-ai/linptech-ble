@@ -1,6 +1,6 @@
 # Windows dashboard
 
-The dashboard is a local test application for ES5BB, MS1BB, KS2BB and HS3BB. The interface remains in Traditional Chinese. It runs without a Xiaomi gateway; monitoring uses credentials already stored locally and does not require a cloud login.
+The dashboard is a local test application for ES5BB, MS1BB, KS2BB and HS3BB. The interface remains in Traditional Chinese. It runs without a Xiaomi gateway. Monitoring uses locally saved credentials; optional Xiaomi Home QR login is for credential setup.
 
 ## Start
 
@@ -13,6 +13,23 @@ Run from the project folder. In an already configured checkout, double-click `st
 Open [http://127.0.0.1:8765/](http://127.0.0.1:8765/). Keep the terminal open and press Ctrl+C to stop. No Node.js build is needed. If the port is occupied, use `--port 8767`; starting a second instance may also compete for Bluetooth access.
 
 New users must first create the Python environment: [developer tools](DEVTOOLS.md). Add sensors and enter credentials through the dashboard; see [credential setup](BINDKEY_WINDOWS.md) for obtaining your own keys. The repository does not include credentials for physical sensors.
+
+## Optional QR credential setup
+
+Install the extra once, then restart the dashboard:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[cloud]"
+```
+
+1. Select **Xiaomi Home keys** in the dashboard and choose the region used by your Xiaomi Home app. Mainland China is `cn`.
+2. Start login, scan the displayed QR in Xiaomi Home and confirm on the phone. Refresh the QR if it expires.
+3. Select the supported devices whose credentials you want to save, then select **Get and save selected**. Only ES5BB, MS1BB, KS2BB and HS3BB are listed.
+4. Check each result. Existing device names and unselected credentials remain unchanged. Missing or incompatible cloud token values do not erase a saved direct token.
+
+The server holds the temporary account session in memory; the browser receives device metadata and credential-status flags, never stored bindkeys, direct tokens or account cookies. Saved device credentials remain plaintext in the private configuration file. Close or cancel the flow when finished. Login and discovery are disabled in replay mode.
+
+Devices must already belong to your own Xiaomi Home account in the selected region. QR login does not activate, reset or rebind them. Disconnect a selected device before replacing its credentials; resolve any pending calibration restoration first. An available bindkey does not guarantee the account exposes a compatible 24-character Standard Auth token. See [credential types and limits](BINDKEY_WINDOWS.md).
 
 Default startup:
 
@@ -65,7 +82,7 @@ The four supported models are not a four-device limit. Multiple sensors of the s
 4. To rename or update credentials, open that device's advanced dialog and select **Name and credentials**. Blank credential fields preserve saved values; stored secrets are never sent back to the page.
 5. To remove a device, use the same form, tick the removal confirmation and select **Remove sensor**. This removes its local configuration and credentials without resetting or unbinding the sensor.
 
-Scanning discovers advertisements, not credentials. RSSI is available without a bindkey; encrypted values require a correct bindkey, and supported GATT controls require the separate token. Discovery and editing are disabled in replay mode. Disconnect before replacing credentials or removing a connected device, and complete any pending calibration restoration first. Existing recordings remain on disk.
+Nearby scanning discovers advertisements and RSSI. Use the optional QR workflow above for account-based key retrieval, or enter keys you already have. Encrypted values require a correct bindkey; supported GATT controls require the separate token. Discovery and editing are disabled in replay mode. Disconnect before replacing credentials or removing a connected device, and complete any pending calibration restoration first. Existing recordings remain on disk.
 
 GUI changes are saved to the configuration selected at startup (`sensors.local.json` by default). Command-line tools remain available: [inventory commands](DEVTOOLS.md#add-rename-or-remove-sensors). Changes made by CLI or a text editor still require stopping and restarting the dashboard; external file edits are not watched.
 

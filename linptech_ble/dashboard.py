@@ -14,7 +14,7 @@ import threading
 import time
 from statistics import median
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 import webbrowser
 
@@ -131,6 +131,9 @@ class DashboardState:
         self.transport = public_transport(BluetoothConfig())
         self.mqtt: HomeAssistantBridge | None = None
         self.inventory: DashboardInventory | None = None
+        # Account sessions and QR data are intentionally absent from snapshots,
+        # SSE, session exports, and MQTT. Only /api/cloud exposes redacted state.
+        self.cloud_credentials: Any = None
         self.devices = {
             device.address: {
                 "address": device.address, "model": device.model, "name": device.name,
@@ -480,7 +483,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = urlsplit(self.path).path
-        if path in {"/api/devices", "/api/discovery"}:
+        if path in {"/api/cloud", "/api/cloud/qr.png"}:
+            self._cloud_get(path)
+        elif path in {"/api/devices", "/api/discovery"}:
             inventory = self.server.state.inventory
             value = (inventory.snapshot() if path == "/api/devices" else inventory.discovery.snapshot()) if inventory else {
                 "enabled": False, "status": "unavailable", "devices": [], "error": None}
@@ -523,12 +528,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         route = urlsplit(self.path).path
-        if route not in {"/api/es5/direct", "/api/sensor/direct", "/api/devices", "/api/discovery"}:
+        if route not in {"/api/es5/direct", "/api/sensor/direct", "/api/devices", "/api/discovery", "/api/cloud"}:
             self._send(404, b"Not found.", "text/plain; charset=utf-8")
             return
         # Custom header + same-origin/Host checks prevent cross-site form posts.
         if self.headers.get("X-Linptech-Control") != "1" or self.headers.get("Content-Type", "").split(";")[0] != "application/json":
             self._send(403, b"Local JSON control requests only.", "text/plain; charset=utf-8")
+            return
+        if route == "/api/cloud":
+            self._cloud_post()
             return
         if route in {"/api/devices", "/api/discovery"}:
             self._inventory_post(route)
@@ -607,6 +615,94 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except DirectError as error:
             self._send(409, json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
+    def _cloud_json(self, status: int, value: dict[str, Any]) -> None:
+        self._send(status, json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+                   "application/json; charset=utf-8")
+
+    def _cloud_get(self, path: str) -> None:
+        manager = self.server.state.cloud_credentials
+        if manager is None or self.server.state.mode != "live":
+            if path == "/api/cloud/qr.png":
+                self._cloud_json(404, {"error": "此工作階段沒有可用的登入 QR。"})
+            else:
+                self._cloud_json(200, {"enabled": False, "dependencies_available": False,
+                    "phase": "unavailable", "run_id": None, "revision": 0, "qr_available": False,
+                    "devices": [], "results": [], "error": None})
+            return
+        try:
+            if path == "/api/cloud":
+                self._cloud_json(200, manager.snapshot())
+                return
+            query_text = urlsplit(self.path).query
+            if len(query_text) > 512:
+                raise ValueError()
+            query = parse_qs(query_text, keep_blank_values=True)
+            if set(query) != {"run", "revision"} or any(len(value) != 1 for value in query.values()):
+                raise ValueError()
+            run_id, revision = query["run"][0], query["revision"][0]
+            if not 1 <= len(run_id) <= 128 or not revision.isascii() or not revision.isdecimal() or len(revision) > 9:
+                raise ValueError()
+            image = manager.qr_image(run_id, int(revision))
+            if image is None:
+                self._cloud_json(404, {"error": "登入 QR 已更新或失效，請重新取得目前工作階段。"})
+            else:
+                if not isinstance(image, bytes) or len(image) > 2_000_000 or not image.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise ValueError()
+                self._send(200, image, "image/png")
+        except (ValueError, TypeError):
+            self._cloud_json(400, {"error": "登入查詢格式不正確。"})
+        except Exception:
+            self._cloud_json(503, {"error": "無法讀取雲端登入狀態；請稍後重新開始。"})
+
+    def _cloud_post(self) -> None:
+        from .cloud_credentials import CloudCredentialError
+        try:
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError()
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 1 <= size <= 16384:
+                raise ValueError()
+            self._post_body_read = True
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError()
+            command = json.loads(raw)
+            if not isinstance(command, dict):
+                raise ValueError()
+            action = command.get("action")
+            if action == "start":
+                if command.keys() != {"action", "region"} or not isinstance(command["region"], str) or len(command["region"]) > 8:
+                    raise ValueError()
+            elif action in {"cancel", "save"}:
+                expected = {"action", "run_id", "devices"} if action == "save" else {"action", "run_id"}
+                if (command.keys() != expected or not isinstance(command.get("run_id"), str)
+                        or not 1 <= len(command["run_id"]) <= 128):
+                    raise ValueError()
+                if action == "save" and (not isinstance(command["devices"], list) or not 1 <= len(command["devices"]) <= 256
+                        or any(not isinstance(item, str) or not 1 <= len(item) <= 128 for item in command["devices"])):
+                    raise ValueError()
+            else:
+                raise ValueError()
+            manager = self.server.state.cloud_credentials
+            if manager is None or self.server.state.mode != "live":
+                self._cloud_json(409, {"error": "此工作階段不允許雲端登入或儲存憑證。"})
+                return
+            if action == "start":
+                result = manager.start(command["region"])
+            elif action == "cancel":
+                result = manager.cancel(command["run_id"])
+            else:
+                result = manager.save(command["run_id"], command["devices"])
+            self._cloud_json(202, result)
+        except CloudCredentialError as error:
+            self._cloud_json(409, {"error": str(error)})
+        except (ValueError, TypeError, UnicodeDecodeError):
+            self._cloud_json(400, {"error": "雲端登入操作格式不正確。"})
+        except Exception:
+            # Transport and provider exceptions may contain account URLs,
+            # cookies, or credentials. Never expose their exception strings.
+            self._cloud_json(503, {"error": "雲端登入暫時無法使用；請取消後重新開始。"})
+
 
 def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool = False,
                     replay_path: str | Path | None = None, stale_after: float = 180,
@@ -663,6 +759,8 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
         state.inventory = DashboardInventory(state, devices, config, controller_factory=make_controller,
             new_telemetry=lambda device: DashboardState([device]).devices[device.address],
             on_controllers_changed=sync_autos)
+        from .cloud_credentials import CloudCredentialManager
+        state.cloud_credentials = CloudCredentialManager(state.inventory)
         if bridge.mqtt.enabled:
             # The bridge supplies its exact advertised address; inventory changes
             # must never route a queued command to a different first ES5 device.
@@ -698,6 +796,12 @@ def serve_dashboard(*, config: str | Path, port: int = 8765, open_browser: bool 
         server.serve_forever(poll_interval=0.25)
     finally:
         server.closing.set()
+        if state.cloud_credentials:
+            try:
+                state.cloud_credentials.close()
+            except Exception:
+                # Account-session cleanup must not prevent scanner/GATT cleanup.
+                pass
         for auto in autos:
             auto.stop()
         if state.mqtt:

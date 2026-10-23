@@ -12,7 +12,7 @@ Start with the [project README](../README.md).
 
 - [Windows Dashboard](DASHBOARD_WINDOWS.md): live testing with your own sensors.
 - [Signal quality](SIGNAL_QUALITY.md): receiver placement, RSSI bands and measurement limits.
-- [Credentials](BINDKEY_WINDOWS.md): separate advertisement bindkeys and direct tokens.
+- [Credentials](BINDKEY_WINDOWS.md): QR setup, advertisement bindkeys and separate direct tokens.
 - [ESPHome and Home Assistant](ESPHOME_HOME_ASSISTANT.md): optional network transport and MQTT.
 - [Development tools](DEVTOOLS.md): CLI, replay and tests.
 

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import asdict
+import hashlib
+import json
 from math import isfinite
 from pathlib import Path
 import threading
@@ -76,6 +79,7 @@ class DashboardInventory:
         self.controller_factory, self.new_telemetry = controller_factory, new_telemetry
         self.on_controllers_changed = on_controllers_changed
         self.lock = threading.RLock()
+        self._revisions: dict[str, int] = {}
         self.discovery = NearbyDiscovery(lambda: {device.address for device in self.devices})
 
     def snapshot(self) -> dict[str, Any]:
@@ -88,6 +92,70 @@ class DashboardInventory:
     def source(self) -> list[DeviceConfig]:
         # List replacement is atomic. Capture refreshes only when identity changes.
         return self.devices
+
+    def _credential_fingerprint(self, address: str) -> str:
+        item = next((device for device in self.devices if device.address == address), None)
+        value = [self._revisions.get(address, 0), asdict(item) if item else None]
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def credential_snapshot(self, addresses: list[str]) -> dict[str, str]:
+        """Internal optimistic-concurrency tokens; never send these to a browser."""
+        if not isinstance(addresses, list) or not 1 <= len(addresses) <= 256:
+            raise ValueError("請選取 1～256 個裝置。")
+        normalized = [normalize_address(address) for address in addresses]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("裝置位址不得重複。")
+        with self.lock:
+            return {address: self._credential_fingerprint(address) for address in normalized}
+
+    def merge_credentials(self, rows: list[dict[str, Any]], *, expected: dict[str, str]) -> dict[str, Any]:
+        """Apply only selected cloud credentials in one validated disk transaction.
+
+        Capture ``expected`` before performing network requests. Names already
+        configured locally and missing credentials remain untouched. The batch
+        either validates in full and saves once, or changes nothing.
+        """
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 256 or not isinstance(expected, dict):
+            raise ValueError("請選取有效的裝置憑證。")
+        with self.lock:
+            if self.state.mode != "live":
+                raise DirectError("離線重播模式不能修改裝置。")
+            existing = {device.address: device for device in self.devices}
+            candidates: dict[str, DeviceConfig] = {}
+            allowed = {"address", "model", "name", "miot_model", "bindkey", "auth_token"}
+            for row in rows:
+                if not isinstance(row, dict) or not row.keys() <= allowed:
+                    raise ValueError("雲端裝置資料格式不正確。")
+                address = normalize_address(row.get("address"))
+                if address in candidates:
+                    raise ValueError("裝置位址不得重複。")
+                old = existing.get(address)
+                model = row.get("model")
+                if old is not None and old.model != model:
+                    raise DirectError("雲端型號與本機裝置不符；未儲存任何變更。")
+                name = old.name if old else row.get("name") or model
+                if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 120
+                        or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                    raise ValueError("裝置名稱格式不正確。")
+                credentials = {}
+                for key in ("bindkey", "auth_token"):
+                    supplied = row.get(key)
+                    if supplied is not None and not isinstance(supplied, str):
+                        raise ValueError("雲端憑證格式不正確。")
+                    credentials[key] = supplied.strip() if supplied and supplied.strip() else getattr(old, key, None)
+                if old is None and not any(credentials.values()):
+                    raise ValueError("新裝置沒有可用憑證；未儲存任何變更。")
+                candidates[address] = DeviceConfig(address, model, name, **credentials,
+                    miot_model=row.get("miot_model") or getattr(old, "miot_model", None))
+            if set(expected) != set(candidates):
+                raise ValueError("憑證儲存快照與所選裝置不符。")
+            if any(expected[address] != self._credential_fingerprint(address) for address in candidates):
+                raise DirectError("查詢期間裝置設定已變更；請重新選取裝置並查詢憑證。")
+            updated = [candidates.get(device.address, device) for device in self.devices]
+            updated.extend(device for address, device in candidates.items() if address not in existing)
+            self._commit_devices(updated)
+            public = {device["address"]: device for device in self.snapshot()["devices"]}
+            return {"devices": [public[address] for address in candidates]}
 
     def submit_auto(self, controller, command: dict[str, Any]) -> str | None:
         """Skip a busy inventory rather than deadlocking its auto-thread stop."""
@@ -140,6 +208,26 @@ class DashboardInventory:
                     credentials[key] = supplied.strip() or (getattr(old, key) if old else None)
                 candidate = DeviceConfig(address, model, name.strip(), **credentials,
                     miot_model=command.get("miot_model", old.miot_model if old else None))
+            updated = [item for item in self.devices if item.address != address]
+            if candidate is not None:
+                if old is not None:
+                    updated = [candidate if item.address == address else item for item in self.devices]
+                else:
+                    updated.append(candidate)
+            self._commit_devices(updated)
+            return self.snapshot()
+
+    def _commit_devices(self, updated: list[DeviceConfig]) -> None:
+        """Called with the inventory lock held; validate all targets before I/O."""
+        if updated == self.devices:
+            return
+        old_devices = {device.address: device for device in self.devices}
+        new_devices = {device.address: device for device in updated}
+        changed = [address for address in dict.fromkeys([*old_devices, *new_devices])
+                   if old_devices.get(address) != new_devices.get(address)]
+        replacements, retired = {}, []
+        for address in changed:
+            old, candidate = old_devices.get(address), new_devices.get(address)
             changed_credentials = old is None or candidate is None or (
                 candidate.bindkey != old.bindkey or candidate.auth_token != old.auth_token
                 or candidate.miot_model != old.miot_model)
@@ -150,20 +238,19 @@ class DashboardInventory:
                         or status.get("status") not in {None, "disconnected", "unavailable"}
                         or status.get("calibration", {}).get("restore_required")):
                     raise DirectError("請先停止操作並中斷直連；若有待還原校正，請先完成還原。")
-            replacement = self.controller_factory(candidate) if candidate and changed_credentials else None
-            updated = [item for item in self.devices if item.address != address]
-            if candidate is not None:
-                if old is not None:
-                    updated = [candidate if item.address == address else item for item in self.devices]
-                else:
-                    updated.append(candidate)
-            try:
-                save_config(self.path, updated)
-            except OSError:
-                raise DirectError("無法儲存本機設定檔；裝置清單尚未變更。") from None
-            if changed_credentials and controller is not None:
-                controller.stop()
-            with self.state.lock:
+                retired.append(controller)
+            if candidate is not None and changed_credentials:
+                replacements[address] = self.controller_factory(candidate)
+        try:
+            save_config(self.path, updated)
+        except OSError:
+            raise DirectError("無法儲存本機設定檔；裝置清單尚未變更。") from None
+        for controller in retired:
+            controller.stop()
+        with self.state.lock:
+            for address in changed:
+                old, candidate = old_devices.get(address), new_devices.get(address)
+                controller = self.state.direct_devices.get(address)
                 if candidate is None:
                     self.state.devices.pop(address, None)
                     self.state.direct_devices.pop(address, None)
@@ -178,22 +265,22 @@ class DashboardInventory:
                                      token_configured=bool(candidate.auth_token))
                     if old and candidate.bindkey != old.bindkey:
                         telemetry.update(verified=False, last_error=None)
-                    if replacement is not None:
-                        self.state.direct_devices[address] = replacement
+                    if address in replacements:
+                        self.state.direct_devices[address] = replacements[address]
                     elif controller is not None:
                         controller.device = candidate
                     for event in self.state.events:
                         if event["address"] == address:
                             event["name"] = candidate.name
-                self.devices = updated
-                self.state.direct = None
-                self.state.sensor_direct = {}
-                for device in updated:
-                    current = self.state.direct_devices.get(device.address)
-                    if device.model == "ES5BB" and self.state.direct is None:
-                        self.state.direct = current
-                    elif device.model != "ES5BB" and current is not None:
-                        self.state.sensor_direct.setdefault(device.model, current)
-            if self.on_controllers_changed:
-                self.on_controllers_changed()
-            return self.snapshot()
+                self._revisions[address] = self._revisions.get(address, 0) + 1
+            self.devices = updated
+            self.state.direct = None
+            self.state.sensor_direct = {}
+            for device in updated:
+                current = self.state.direct_devices.get(device.address)
+                if device.model == "ES5BB" and self.state.direct is None:
+                    self.state.direct = current
+                elif device.model != "ES5BB" and current is not None:
+                    self.state.sensor_direct.setdefault(device.model, current)
+        if self.on_controllers_changed:
+            self.on_controllers_changed()

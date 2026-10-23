@@ -13,7 +13,22 @@ These credentials are not interchangeable. A generic cloud `TOKEN`, Windows pair
 
 If your own devices are already configured, keep using the local `sensors.local.json`. Monitoring does not require another login. The public repository and distribution do not contain credentials for physical devices.
 
-The dashboard's **Add sensor** and per-device **Name and credentials** form can save keys you already obtained. Blank fields preserve saved credentials; the browser never receives them back. Nearby scanning identifies devices and RSSI, not their keys. The dashboard currently has no cloud-login, QR-extraction or export-file import flow; the separate account-based procedure below remains necessary for new credentials.
+The dashboard's **Add sensor** and per-device **Name and credentials** form can save keys you already obtained. Blank fields preserve saved credentials; the browser never receives them back. Nearby scanning identifies devices and RSSI, not their keys. The optional QR workflow below retrieves credentials from your own Xiaomi Home account.
+
+## Dashboard QR login
+
+Install optional cloud dependencies and start the dashboard:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[cloud]"
+.\start-dashboard.cmd
+```
+
+Select **Xiaomi Home keys**, choose the same region as the app, then start login. Scan the QR with Xiaomi Home and confirm on your phone. Choose the supported devices and select **Get and save selected**. Refresh an expired QR from the same panel.
+
+Only selected devices are merged into the active local configuration. Existing names and unselected devices are preserved. A missing bindkey or compatible direct token does not clear a saved value. Generic 32-character cloud tokens are ignored for Standard Auth; GATT requires exactly 24 hexadecimal characters. Disconnect a selected device before replacing its credentials.
+
+Account login is optional and temporary: the dashboard keeps its session in server memory and exposes only device metadata and credential-status flags to the page. Device keys are saved to the private configuration file. No Xiaomi gateway is involved, and subsequent local monitoring does not need a cloud session. This is a community protocol integration, not an official Xiaomi account SDK.
 
 ## Obtain your own credentials
 
@@ -21,7 +36,7 @@ Account-free scanning can identify product IDs and record encrypted advertisemen
 
 [Mi Activation](https://atc1441.github.io/Temp_universal_mi_activate.html) is a separate experimental provisioning tool, not a passive extractor of an existing key. Activation can replace the current binding. This project does not recommend resetting a working sensor or flashing unrelated firmware to try it.
 
-If you choose the account-based route, first bind each physical sensor to your own Xiaomi Home account. Match the extractor's region to the region where the devices were added. An authorized export can be obtained separately using the upstream [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor). This library does not bundle or launch that tool, perform a cloud login, or ask you to share account credentials.
+For account-based retrieval, first bind each physical sensor to your own Xiaomi Home account. Match the chosen region to the region where the devices were added. The dashboard can use the QR workflow above; alternatively, obtain an authorized export separately using the upstream [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor). The project does not bundle or launch its executable. Core decoding and direct connections do not log into an account.
 
 Match each export entry to the actual device and address. Use its `BLE KEY` for advertisements. Import only a correctly sized Standard Auth token for GATT; an arbitrary token field is insufficient.
 

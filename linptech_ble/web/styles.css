@@ -472,6 +472,53 @@
   .management-danger .button, .button.danger { color: #924a34; border-color: #d9b8ab; background: transparent; }
   .management-danger .button:hover, .button.danger:hover { border-color: #bd8876; background: #f7ebe5; }
   .empty-discovery { padding: 22px 16px; text-align: center; color: var(--muted); font-size: .7rem; }
+
+  .view-nav #cloud-credentials { align-self: center; min-height: 36px; margin: 0 0 8px auto; padding-block: 7px; font-size: .69rem; }
+  .view-nav:has(#cloud-credentials) #add-device { margin-left: 0; }
+  .cloud-layout { padding: 0 26px; }
+  .cloud-section { min-width: 0; padding: 22px 0; border-bottom: 1px solid var(--line); }
+  .cloud-section:last-child { border-bottom: 0; }
+  .cloud-section h3, .cloud-result h3 { font-size: .84rem; margin-bottom: 8px; }
+  .cloud-section > p, .cloud-layout > p, .cloud-result p { font-size: .7rem; overflow-wrap: anywhere; }
+  .cloud-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+  .cloud-toolbar .form-field, .cloud-toolbar .field { display: flex; flex: 1 1 190px; flex-direction: column; gap: 6px; min-width: 0; max-width: 340px; font-size: .68rem; font-weight: 600; }
+  .cloud-toolbar select { width: 100%; max-width: 100%; min-height: 41px; padding: 9px 11px; border: 1px solid #c6cebe; border-radius: 4px; background: var(--surface); color: var(--ink); font-size: .75rem; }
+  .cloud-toolbar .button { flex: none; min-height: 41px; }
+  .cloud-status { margin-top: 16px; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+  .cloud-status:empty { display: none; }
+  .cloud-status.error, .cloud-status[data-state="error"], #cloud-feedback.error, #cloud-feedback[data-state="error"] { color: #924a34; }
+  .cloud-status[data-state="complete"], .cloud-status[data-state="selecting"] { color: var(--green); }
+  .cloud-qr { display: grid; place-items: center; width: fit-content; max-width: 100%; margin: 18px auto 12px; padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 5px; }
+  .cloud-qr img { display: block; width: 240px; height: auto; max-width: 100%; aspect-ratio: 1; object-fit: contain; background: #fff; }
+  #cloud-expiry { margin-top: 10px; text-align: center; font-size: .66rem; font-variant-numeric: tabular-nums; }
+  .cloud-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  .cloud-actions .button { min-height: 38px; font-size: .68rem; }
+  .cloud-selection-tools { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-top: 16px; font-size: .67rem; color: var(--muted); }
+  .cloud-selection-tools label { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; color: var(--ink); }
+  .cloud-selection-tools input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }
+  .cloud-device-list { display: grid; gap: 0; min-width: 0; margin-top: 8px; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .cloud-device-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 15px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+  .cloud-device-row:first-child { border-top: 0; }
+  .cloud-device-row:hover, .cloud-device-row:has(input:checked) { background: var(--wash); }
+  .cloud-device-row:has(input:disabled) { cursor: default; }
+  .cloud-device-row > input { flex: none; width: 17px; height: 17px; margin: 3px 0 0; accent-color: var(--green); }
+  .cloud-device-content { flex: 1; min-width: 0; }
+  .cloud-device-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: .75rem; font-weight: 600; overflow-wrap: anywhere; }
+  .cloud-device-heading strong { font-weight: 600; }
+  .cloud-device-heading > span { font-size: .62rem; color: var(--muted); }
+  .cloud-device-meta { display: block; margin-top: 4px; color: var(--muted); font: .6rem var(--mono); line-height: 1.7; overflow-wrap: anywhere; }
+  .cloud-device-flags { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 7px; color: var(--muted); font-size: .62rem; }
+  .cloud-device-flags > span { display: inline-flex; align-items: center; gap: 5px; }
+  .cloud-device-flags .configured, .cloud-device-flags [data-configured="true"] { color: var(--green); }
+  .cloud-empty { padding: 24px 14px; text-align: center; color: var(--muted); font-size: .71rem; }
+  #cloud-save-form { margin-top: 16px; }
+  #cloud-feedback { margin-top: 12px; color: var(--muted); font-size: .7rem; overflow-wrap: anywhere; }
+  #cloud-feedback:empty { display: none; }
+  .cloud-result { padding: 22px 0; border-bottom: 1px solid var(--line); }
+  .cloud-result ul { margin: 12px 0 0; padding-left: 20px; color: var(--green); font-size: .71rem; }
+  .cloud-result li { padding-block: 5px; overflow-wrap: anywhere; }
+  .cloud-layout > p:last-child { padding-top: 18px; color: var(--muted); font-size: .64rem; line-height: 1.9; }
+  .cloud-loading { color: var(--muted); font-size: .7rem; }
   @keyframes drawer-in { from { transform: translateX(20px); opacity: .65; } to { transform: translateX(0); opacity: 1; } }
 }
 @layer responsive {
@@ -521,6 +568,13 @@
     #drawer-title { font-size: 1.08rem; }
     #drawer-subtitle { font-size: .62rem; }
     .management-layout { padding-inline: 18px; }
+    .cloud-layout { padding-inline: 18px; }
+    .cloud-section, .cloud-result { padding-block: 19px; }
+    .cloud-toolbar .form-field, .cloud-toolbar .field { flex-basis: 100%; max-width: none; }
+    .cloud-toolbar > .button { width: 100%; }
+    .cloud-device-row { gap: 10px; padding: 13px 11px; }
+    .cloud-actions .button { flex: 1; }
+    .view-nav #cloud-credentials { min-height: 34px; padding-inline: 10px; font-size: .63rem; }
     .management-grid { grid-template-columns: minmax(0, 1fr); }
     .management-section { padding-block: 19px; }
     .discovery-device { padding: 12px; gap: 8px; }

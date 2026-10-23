@@ -19,6 +19,7 @@ project does not relicense them. They are dependencies, not vendored copies.
 | [bleak-esphome](https://github.com/Bluetooth-Devices/bleak-esphome) | 4.1.0 | MIT | Optional ESPHome transport |
 | [aioesphomeapi](https://github.com/esphome/aioesphomeapi) | 46.21.0 | MIT | Optional encrypted ESPHome API |
 | [paho-mqtt](https://github.com/eclipse-paho/paho.mqtt.python) | 2.1.0 | EPL-2.0 OR BSD-3-Clause | Optional MQTT bridge |
+| [Requests](https://github.com/psf/requests) | 2.34.2 minimum | Apache-2.0 | Optional explicit Xiaomi Cloud QR credential lookup |
 
 Xiaomi MIoT instance JSON files in `linptech_ble/specs/` are public protocol
 reference data from [miot-spec.org](https://miot-spec.org/). Their vendor
@@ -34,6 +35,35 @@ The independent Xiaomi Standard Auth / BLE Spec implementation was informed by t
 MIT License
 
 Copyright (c) 2026 Pravdin Oleg
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Optional Xiaomi Cloud protocol adaptation
+
+The QR login and RC4 request protocol in `linptech_ble/cloud_credentials.py` is
+adapted from [PiotrMachowski/Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor).
+This independent community tool is not an official Xiaomi SDK. No executable,
+account session, exported credentials, or vendor code is bundled.
+
+MIT License
+
+Copyright (c) 2020 Piotr Machowski
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

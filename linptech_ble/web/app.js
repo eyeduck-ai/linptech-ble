@@ -88,7 +88,7 @@ let lastAnnouncedId = 0;
 let initializedSession = null;
 let selectedRadioDevice = null;
 const advancedPanels = new Map(), temperaturePanels = new Map(), radioRowNodes = new Map();
-let drawerTarget = null, drawerReturnFocus = null, managementSession = null;
+let drawerTarget = null, drawerReturnFocus = null, managementSession = null, cloudSession = null;
 function domId(address, id) { return `device-${address.replace(/[^a-zA-Z0-9]/g, "")}-${id}`; }
 function clonePanel(templateId, address) {
   const content = $(templateId).content.cloneNode(true);
@@ -274,6 +274,12 @@ function releaseDrawerContent() {
     if (managementSession.scanning) void managementRequest("/api/discovery", { action: "stop" }).catch(() => {});
     managementSession = null;
   }
+  if (cloudSession) {
+    const session = cloudSession; cloudSession = null;
+    clearInterval(session.poll);
+    managementUi(session, "cloud-qr-image").removeAttribute("src");
+    if (cloudRunActive(session.data)) void managementRequest("/api/cloud", { action: "cancel", run_id: session.data.run_id }).catch(() => {});
+  }
   drawerTarget = null;
 }
 function showDrawer(title, subtitle, element, trigger) {
@@ -304,6 +310,8 @@ function managementFeedback(session, text, error = false) {
 function updateManagementAvailability() {
   const unavailable = !connected || paused || latest?.mode === "replay" || latest?.management?.enabled === false;
   $("add-device").disabled = unavailable;
+  $("cloud-credentials").disabled = unavailable;
+  if (cloudSession) updateCloudAvailability(cloudSession, unavailable);
   if (!managementSession) return;
   const session = managementSession, locked = unavailable || session.posting || session.loading;
   managementUi(session, "management-form").querySelectorAll("input, select").forEach(input => { input.disabled = locked; });
@@ -311,6 +319,7 @@ function updateManagementAvailability() {
   managementUi(session, "management-save").disabled = locked;
   managementUi(session, "discovery-start").disabled = locked;
   managementUi(session, "management-remove").disabled = locked || !managementUi(session, "management-remove-confirm").checked;
+  managementUi(session, "management-cloud").disabled = locked;
 }
 function fillManagement(session, device) {
   session.editing = Boolean(device); session.address = device?.address || null;
@@ -379,6 +388,7 @@ async function openManagement(address = null, trigger = null) {
   ui("management-reveal").addEventListener("change", () => { ["management-bindkey", "management-token"].forEach(id => { ui(id).type = ui("management-reveal").checked ? "text" : "password"; }); });
   ui("management-remove-confirm").addEventListener("change", updateManagementAvailability);
   ui("management-back").addEventListener("click", () => openAdvanced(session.address, drawerReturnFocus));
+  ui("management-cloud").addEventListener("click", () => { if (!ui("management-cloud").disabled) void openCloudCredentials(drawerReturnFocus); });
   ui("discovery-start").addEventListener("click", async () => {
     if (ui("discovery-start").disabled) return;
     session.posting = true; updateManagementAvailability();
@@ -427,6 +437,164 @@ async function saveManagedDevice(session, remove = false) {
   } catch (error) {
     if (managementSession === session) managementFeedback(session, error.name === "TimeoutError" ? "請求逾時；請先關閉此視窗並確認裝置清單，再決定是否重試。" : error.message, true);
   } finally { session.posting = false; updateManagementAvailability(); }
+}
+function cloudRunActive(data) {
+  return Boolean(data?.run_id && ["preparing", "awaiting_qr", "querying", "selecting", "saving", "cancelling"].includes(data.phase));
+}
+function cloudPhaseText(data) {
+  const messages = {
+    idle: "選擇與米家 App 相同的地區，再產生登入 QR。",
+    preparing: "正在準備新的登入 QR…",
+    awaiting_qr: "請用米家 App 掃碼，並在手機確認登入。",
+    querying: "登入成功，正在查詢支援的感測器…",
+    selecting: "登入成功，請勾選要取得憑證的裝置。",
+    saving: "正在取得所選裝置憑證並保存，請稍候…",
+    complete: "所選裝置憑證已保存，監聽設定已同步。",
+    cancelled: "登入已取消，可重新產生 QR。",
+    cancelling: "正在取消登入…",
+    expired: "登入已過期，請重新產生 QR。",
+    error: "無法完成登入或取 key，請重新嘗試。",
+  };
+  if (data.enabled === false) return "目前模式不支援雲端取 key，請使用即時監控。";
+  if (data.dependencies_available === false) return "尚未安裝雲端登入套件。請先安裝 linptech-ble[cloud]，再重新啟動監控台。";
+  return data.error || messages[data.phase] || "正在確認登入狀態…";
+}
+function updateCloudAvailability(session, unavailable = !connected || paused || latest?.mode === "replay" || latest?.management?.enabled === false) {
+  if (cloudSession !== session) return;
+  const data = session.data || {}, ui = id => managementUi(session, id);
+  const locked = unavailable || session.posting || session.loading;
+  const disabled = data.enabled === false || data.dependencies_available === false;
+  ui("cloud-start").disabled = locked || disabled || cloudRunActive(data);
+  ui("cloud-region").disabled = locked || cloudRunActive(data);
+  ui("cloud-refresh").disabled = locked || disabled || ["saving", "cancelling"].includes(data.phase);
+  ui("cloud-cancel").disabled = locked || !cloudRunActive(data) || data.phase === "cancelling";
+  ui("cloud-save").disabled = locked || data.phase !== "selecting" || !session.selected.size;
+  ui("cloud-select-all").disabled = locked || data.phase !== "selecting" || !(data.devices || []).length;
+  session.element.querySelectorAll("input[data-device-id]").forEach(input => { input.disabled = locked || data.phase !== "selecting"; });
+  ui("cloud-selected-count").textContent = `已選 ${session.selected.size} 顆`;
+  const count = (data.devices || []).length;
+  ui("cloud-select-all").checked = count > 0 && session.selected.size === count;
+  ui("cloud-select-all").indeterminate = session.selected.size > 0 && session.selected.size < count;
+}
+function renderCloudCredentials(session, data) {
+  if (cloudSession !== session) return;
+  const previous = session.data, ui = id => managementUi(session, id);
+  if (previous?.run_id !== data.run_id) { session.selected.clear(); session.devicesSignature = null; }
+  session.data = data;
+  if (data.region) ui("cloud-region").value = data.region;
+  ui("cloud-status").textContent = cloudPhaseText(data);
+  ui("cloud-status").dataset.state = data.error || data.phase === "error" ? "error" : data.phase;
+  const showQr = data.phase === "awaiting_qr" && data.qr_available && Boolean(data.run_id);
+  ui("cloud-qr").hidden = !showQr;
+  const imageKey = showQr ? `${data.run_id}:${data.revision}` : null;
+  if (imageKey !== session.imageKey) {
+    session.imageKey = imageKey;
+    if (showQr) ui("cloud-qr-image").src = `/api/cloud/qr.png?run=${encodeURIComponent(data.run_id)}&revision=${encodeURIComponent(data.revision)}`;
+    else ui("cloud-qr-image").removeAttribute("src");
+  }
+  const expiry = typeof data.expires_at === "number" ? data.expires_at * 1000 : Date.parse(data.expires_at);
+  ui("cloud-expiry").hidden = !showQr || !Number.isFinite(expiry);
+  if (showQr && Number.isFinite(expiry)) ui("cloud-expiry").textContent = `QR 有效至 ${timeFormat.format(new Date(expiry))}，過期後可重新產生。`;
+  ui("cloud-refresh").hidden = !["awaiting_qr", "expired", "error", "cancelled"].includes(data.phase);
+  ui("cloud-cancel").hidden = !cloudRunActive(data);
+  ui("cloud-selection").hidden = !["selecting", "saving"].includes(data.phase);
+  const devices = data.devices || [], ids = new Set(devices.map(device => device.id));
+  for (const id of session.selected) if (!ids.has(id)) session.selected.delete(id);
+  const signature = JSON.stringify([data.run_id, devices]);
+  if (signature !== session.devicesSignature) {
+    session.devicesSignature = signature;
+    const rows = devices.map(device => {
+      const row = el("label", "cloud-device-row"), input = el("input"), content = el("div", "cloud-device-content");
+      input.type = "checkbox"; input.dataset.deviceId = device.id; input.checked = session.selected.has(device.id);
+      input.addEventListener("change", () => {
+        if (input.checked) session.selected.add(device.id); else session.selected.delete(device.id);
+        updateCloudAvailability(session);
+      });
+      content.append(el("strong", "cloud-device-heading", device.name || device.model), el("span", "cloud-device-meta", `${device.model} · ${device.address}`));
+      const flags = [device.configured ? "已加入監控" : "新裝置"];
+      if (device.key_configured) flags.push("bindkey 已保存");
+      if (device.token_configured) flags.push("token 已保存");
+      flags.push(device.token_available ? "雲端有直連 token" : "雲端未提供相容 token");
+      content.append(el("span", "cloud-device-flags", flags.join(" · ")));
+      row.append(input, content); return row;
+    });
+    if (!rows.length) rows.push(el("p", "cloud-empty", "此地區沒有找到支援的感測器。請核對米家 App 地區與帳號。"));
+    ui("cloud-devices").replaceChildren(...rows);
+  }
+  const results = Array.isArray(data.results) ? data.results : (data.result?.saved || []);
+  ui("cloud-result").hidden = data.phase !== "complete";
+  if (data.phase === "complete") {
+    const resultText = (saved, retrieved) => retrieved ? "已取得並保存" : saved ? "沿用原值" : "未取得";
+    ui("cloud-results").replaceChildren(...results.map(device => el("li", "", `${device.name || device.model || device.address} · bindkey ${resultText(device.key_configured, device.bindkey_retrieved)} · token ${resultText(device.token_configured, device.token_retrieved)}`)));
+    if (previous?.phase !== "complete") void refreshCloudInventory(session);
+  }
+  updateCloudAvailability(session);
+}
+async function refreshCloudInventory(session) {
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (response.ok) receive(await response.json());
+    if (cloudSession === session) $("announcer").textContent = "所選裝置憑證已保存，其他裝置保持原樣。";
+  } catch { if (cloudSession === session) managementUi(session, "cloud-feedback").textContent = "憑證已保存；裝置清單將在主機重新連線後同步。"; }
+}
+async function pollCloudCredentials(session) {
+  if (cloudSession !== session || session.polling || session.posting || !connected) return;
+  const requestVersion = session.requestVersion;
+  session.polling = true;
+  try {
+    const data = await managementRequest("/api/cloud");
+    if (!session.posting && requestVersion === session.requestVersion) renderCloudCredentials(session, data);
+  } catch {
+    if (cloudSession === session) managementUi(session, "cloud-feedback").textContent = "無法讀取登入狀態，請確認本機程式仍在執行。";
+  } finally { session.polling = false; }
+}
+async function cloudCommand(session, action) {
+  if (cloudSession !== session || session.posting) return;
+  const ui = id => managementUi(session, id);
+  const body = action === "start" ? { action, region: ui("cloud-region").value } :
+    { action, run_id: session.data?.run_id, ...(action === "save" ? { devices: [...session.selected] } : {}) };
+  session.requestVersion++;
+  session.posting = true; updateCloudAvailability(session); ui("cloud-feedback").textContent = "";
+  try {
+    const data = await managementRequest("/api/cloud", body);
+    if (cloudSession !== session) {
+      if (action === "start" && cloudRunActive(data)) void managementRequest("/api/cloud", { action: "cancel", run_id: data.run_id }).catch(() => {});
+      return;
+    }
+    renderCloudCredentials(session, data);
+  } catch (error) {
+    if (cloudSession === session) {
+      ui("cloud-feedback").textContent = error.name === "TimeoutError" ? "請求逾時，正在重新核對狀態。請勿重複保存。" : error.message;
+      ui("cloud-feedback").dataset.state = "error";
+    }
+  } finally { session.posting = false; updateCloudAvailability(session); }
+}
+async function openCloudCredentials(trigger = null) {
+  const element = $("cloud-template").content.firstElementChild.cloneNode(true);
+  showDrawer("米家取 key", "掃碼登入 → 選取裝置 → 取得並保存憑證", element, trigger);
+  const session = { element, selected: new Set(), data: null, loading: true, posting: false, polling: false, poll: null, requestVersion: 0 };
+  cloudSession = session;
+  const ui = id => managementUi(session, id);
+  ui("cloud-login-form").addEventListener("submit", event => { event.preventDefault(); if (!ui("cloud-start").disabled) void cloudCommand(session, "start"); });
+  ui("cloud-refresh").addEventListener("click", async () => {
+    if (ui("cloud-refresh").disabled) return;
+    if (cloudRunActive(session.data)) await cloudCommand(session, "cancel");
+    if (cloudSession === session && !cloudRunActive(session.data)) await cloudCommand(session, "start");
+  });
+  ui("cloud-cancel").addEventListener("click", () => { if (!ui("cloud-cancel").disabled) void cloudCommand(session, "cancel"); });
+  ui("cloud-select-all").addEventListener("change", () => {
+    session.selected = new Set(ui("cloud-select-all").checked ? (session.data?.devices || []).map(device => device.id) : []);
+    session.element.querySelectorAll("input[data-device-id]").forEach(input => { input.checked = session.selected.has(input.dataset.deviceId); });
+    updateCloudAvailability(session);
+  });
+  ui("cloud-save-form").addEventListener("submit", event => { event.preventDefault(); if (!ui("cloud-save").disabled) void cloudCommand(session, "save"); });
+  ui("cloud-qr-image").addEventListener("error", () => { if (cloudSession === session && session.imageKey) ui("cloud-feedback").textContent = "QR 無法載入或已過期，請重新產生。"; });
+  try { renderCloudCredentials(session, await managementRequest("/api/cloud")); }
+  catch (error) { if (cloudSession === session) ui("cloud-status").textContent = error.message; }
+  finally {
+    session.loading = false;
+    if (cloudSession === session) { session.poll = setInterval(() => { void pollCloudCredentials(session); }, 1500); updateCloudAvailability(session); }
+  }
 }
 function renderEs5Observations(device, state) {
   const section = advancedPanels.get(device.address)?.host?.querySelector(".es5-observations"); if (!section) return;
@@ -478,7 +646,7 @@ function renderFeed(state) {
     item.append(el("span", "event-mark"), details, time);
     return item;
   });
-  if (!nodes.length) nodes.push(el("li", "empty", state.events.length ? "目前篩選條件下沒有紀錄。" : "等待第一筆廣播。可從「測試操作」查看觸發方式。"));
+  if (!nodes.length) nodes.push(el("li", "empty", state.events.length ? "目前篩選條件下沒有紀錄。" : "等待第一筆廣播。可從「感測器介紹」查看觸發方式。"));
   $("event-feed").replaceChildren(...nodes);
   $("feed-retained").textContent = `${state.events.length} / 300`;
 }
@@ -1141,6 +1309,7 @@ $("receiver-filter").addEventListener("change", () => { if (shown) renderRadio(s
 $("signal-device").addEventListener("change", () => { selectedRadioDevice = $("signal-device").value; if (shown) renderRadio(shown); });
 $("signal-export").addEventListener("click", exportRadio);
 $("add-device").addEventListener("click", () => { if (!$("add-device").disabled) void openManagement(null, $("add-device")); });
+$("cloud-credentials").addEventListener("click", () => { if (!$("cloud-credentials").disabled) void openCloudCredentials($("cloud-credentials")); });
 $("drawer-close").addEventListener("click", () => $("device-drawer").close());
 $("device-drawer").addEventListener("close", () => {
   releaseDrawerContent(); $("drawer-content").replaceChildren();

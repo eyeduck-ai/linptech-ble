@@ -13,7 +13,7 @@
   <a class="skip" href="#main">跳至監控內容</a>
   <header class="masthead">
     <a class="brand" href="/" aria-label="Linptech 監控首頁"><img src="/icon.svg" width="34" height="34" alt=""><span>linptech<span class="brand-sub">LOCAL SENSOR MONITOR</span></span></a>
-    <div class="header-tools"><span class="local-label">WINDOWS / BLUETOOTH LE</span><button id="help-button" class="button quiet">測試操作 <span aria-hidden="true">↗</span></button><a class="button export" href="/api/export" download="linptech-session.json">匯出紀錄 <span aria-hidden="true">↓</span></a></div>
+    <div class="header-tools"><span class="local-label">WINDOWS / BLUETOOTH LE</span><button id="help-button" class="button quiet">感測器介紹 <span aria-hidden="true">↗</span></button><a class="button export" href="/api/export" download="linptech-session.json">匯出紀錄 <span aria-hidden="true">↓</span></a></div>
   </header>
   <main id="main" tabindex="-1">
     <section class="intro">
@@ -29,7 +29,7 @@
       <div><span>接收廣播</span><strong id="packet-count">—</strong><small>PACKETS</small></div>
       <div><span>狀態與事件</span><strong id="event-count">—</strong><small>UPDATES</small></div>
     </div>
-    <nav class="view-nav" aria-label="監控頁面"><a href="#devices" id="devices-link" aria-current="page">裝置清單</a><a href="#signals" id="signals-link">訊號品質</a><button id="add-device" type="button" class="button export" disabled>新增感測器 ＋</button></nav>
+    <nav class="view-nav" aria-label="監控頁面"><a href="#devices" id="devices-link" aria-current="page">裝置清單</a><a href="#signals" id="signals-link">訊號品質</a><button id="cloud-credentials" type="button" class="button quiet" disabled>米家取 key</button><button id="add-device" type="button" class="button export" disabled>新增感測器 ＋</button></nav>
     <form id="device-toolbar" class="device-toolbar" role="search" aria-label="篩選感測器">
       <label>搜尋裝置<input id="device-search" type="search" placeholder="名稱或 MAC" autocomplete="off"></label>
       <label>型號<select id="model-filter"><option value="all">所有型號</option><option>ES5BB</option><option>MS1BB</option><option>KS2BB</option><option>HS3BB</option></select></label>
@@ -125,8 +125,8 @@
     <footer><span>LINPTECH / LOCAL MONITOR</span><span id="recording-info">本機紀錄</span><span>TAIPEI · UTC+08:00</span></footer>
   </main>
   <dialog id="help-dialog" aria-labelledby="help-title">
-    <div class="dialog-heading"><div><p class="eyebrow">A QUICK FIELD GUIDE</p><h2 id="help-title">讓感測器動起來</h2></div><button id="close-help" class="button quiet" autofocus>關閉 <span aria-hidden="true">×</span></button></div>
-    <p>開啟 Windows 藍牙，將裝置放近電腦，先離開手機米家的裝置控制頁，再依下列方式操作。</p>
+    <div class="dialog-heading"><div><p class="eyebrow">SENSOR FIELD GUIDE</p><h2 id="help-title">感測器介紹</h2></div><button id="close-help" class="button quiet" autofocus>關閉 <span aria-hidden="true">×</span></button></div>
+    <p>四款感測器的功能與測試方式。一般狀態來自藍牙廣播；距離能量與進階設定需另開直連。測試前將裝置放近接收器，並退出手機米家的裝置控制頁。</p>
     <ol class="guide-list"><li><strong>ES5BB · 人體存在</strong><p>確認供電，單擊實體按鍵喚醒。在正前方約 1～2 公尺走動 5～10 秒，再停留約 30 秒；離開偵測範圍後，等待裝置設定的無人判定延遲。</p></li><li><strong>MS1BB · 門窗</strong><p>將磁鐵靠近與移開感測器數次，觀察「關閉／開啟」與事件紀錄。</p></li><li><strong>KS2BB · 按鍵與溫濕度</strong><p>分別單擊、雙擊、長按功能鍵。輕握外殼約 1 分鐘，再放回桌面等待溫度更新；按鍵不保證會立即觸發溫濕度廣播。</p></li><li><strong>HS3BB · 移動與照度</strong><p>在感測器前走動，再離開並等候裝置自行回報靜止；可改變環境亮度測試照度。</p></li></ol>
     <div class="advanced-note"><h3>ES5BB 的無人狀態、距離與校正</h3><p>「有人」必須等感測器回報「無人」才會切換；離開範圍後還要等待裝置的無人判定延遲，可在直連工作台查閱及調整。本機的 3 分鐘只用來標示存在狀態過舊，並不是感測器的無人延遲。</p><p>距離以 0.25 公尺區段顯示。連線會開啟即時能量回報；雷達重新校正沒有完成旗標，請以後續底噪及有人／無人測試驗證。空房閾值掃描會先預覽、再套用與回讀。RSSI 是感測器到電腦的訊號強度。</p></div>
     <p class="subtle">暫停畫面只凍結顯示，後台持續接收。要結束監聽，請在啟動程式的 PowerShell 按 Ctrl+C。</p>
@@ -145,6 +145,7 @@
       <section class="management-section" aria-labelledby="management-title">
         <h3 id="management-title">加入感測器</h3>
         <p id="credential-status" class="credential-status"></p>
+        <button id="management-cloud" type="button" class="button quiet">米家掃碼取得憑證</button>
         <form id="management-form" class="management-form" action="/api/devices" method="post" autocomplete="off">
           <div class="management-grid">
             <div class="field"><label for="management-model">型號（必填）</label><select id="management-model" name="model" required><option value="">選擇型號</option><option>ES5BB</option><option>MS1BB</option><option>KS2BB</option><option>HS3BB</option></select></div>
@@ -165,6 +166,31 @@
         <label><input id="management-remove-confirm" type="checkbox">確認移除此裝置的本機設定</label>
         <button id="management-remove" type="button" class="button" disabled>移除感測器</button>
       </section>
+    </div>
+  </template>
+  <template id="cloud-template">
+    <div class="cloud-layout">
+      <section class="cloud-section" aria-labelledby="cloud-login-title">
+        <h3 id="cloud-login-title">1 · 選地區並登入</h3>
+        <form id="cloud-login-form" class="cloud-toolbar">
+          <div class="field"><label for="cloud-region">米家 App 地區</label><select id="cloud-region" required><option value="cn">中國大陸 · cn</option><option value="tw">台灣 · tw</option><option value="sg">新加坡 · sg</option><option value="de">歐洲 · de</option><option value="us">美國 · us</option><option value="ru">俄羅斯 · ru</option><option value="in">印度 · in</option><option value="i2">印度 · i2</option></select></div>
+          <button id="cloud-start" type="submit" class="button export" disabled>產生登入 QR</button>
+        </form>
+        <p id="cloud-status" class="cloud-status" role="status" aria-live="polite">正在讀取登入狀態…</p>
+        <div id="cloud-qr" class="cloud-qr" hidden><img id="cloud-qr-image" width="240" height="240" alt="米家登入 QR，請用米家 App 掃碼並在手機確認登入"></div>
+        <p id="cloud-expiry" class="subtle" hidden></p>
+        <div class="cloud-actions"><button id="cloud-refresh" type="button" class="button" hidden>重新產生 QR</button><button id="cloud-cancel" type="button" class="button quiet" hidden>取消登入</button></div>
+      </section>
+      <section id="cloud-selection" class="cloud-section" aria-labelledby="cloud-selection-title" hidden>
+        <h3 id="cloud-selection-title">2 · 選取要保存憑證的裝置</h3>
+        <p class="subtle">僅列出支援的四款型號。既有名稱與未勾選裝置保持原樣，缺少的憑證不會覆蓋已存值。</p>
+        <div class="cloud-selection-tools"><label><input id="cloud-select-all" type="checkbox">全選</label><span id="cloud-selected-count" class="subtle">已選 0 顆</span></div>
+        <div id="cloud-devices" class="cloud-device-list" aria-label="米家感測器"></div>
+        <form id="cloud-save-form" class="cloud-actions"><button id="cloud-save" type="submit" class="button export" disabled>取得並保存所選憑證</button></form>
+      </section>
+      <section id="cloud-result" class="cloud-result" aria-labelledby="cloud-result-title" hidden><h3 id="cloud-result-title">保存結果</h3><ul id="cloud-results"></ul></section>
+      <p id="cloud-feedback" class="management-message" role="status" aria-live="polite"></p>
+      <p class="subtle">登入工作階段只暫存於本機記憶體。憑證保存至本機設定檔；網頁不顯示金鑰。平常監聽與直連不需小米網關。</p>
     </div>
   </template>
   <div id="announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>

@@ -2,7 +2,7 @@
 
 Python library for **ES5BB, MS1BB, KS2BB and HS3BB**: decode MiBeacon advertisements and use authenticated GATT on supported models. Works with local BLE or an optional ESPHome Bluetooth Proxy. **No Xiaomi gateway is required.**
 
-**0.4.0 · Python 3.11+ · MIT · experimental API.** The caller supplies credentials; the library does not log into Xiaomi, discover account keys or load local configuration automatically. Importing the package does not scan, connect or start background threads.
+**0.4.0 · Python 3.11+ · MIT · experimental API.** The core library takes caller-supplied credentials. Importing the package does not scan, connect, load local configuration or start background threads. The optional Dashboard can provision credentials through an explicit Xiaomi Home QR login.
 
 ## Install
 
@@ -15,7 +15,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-Optional dependencies: install `.[proxy]` for ESPHome, `.[ha]` for the MQTT bridge, or `.[bridge]` for both. A local wheel can also be installed with pip; this release is not published on PyPI.
+Optional dependencies: install `.[proxy]` for ESPHome, `.[ha]` for the MQTT bridge, `.[bridge]` for both, or `.[cloud]` for Dashboard QR credential setup. A local wheel can also be installed with pip; this release is not published on PyPI.
 
 ## Decode advertisements
 
@@ -64,7 +64,7 @@ See [device capabilities and evidence](docs/DEVICE_CAPABILITIES.md) for field-le
 
 ## Optional live test Dashboard
 
-From this checkout, after configuring your own devices:
+From this checkout:
 
 ```powershell
 .\start-dashboard.cmd
@@ -72,7 +72,7 @@ From this checkout, after configuring your own devices:
 python -m linptech_ble dashboard --open
 ```
 
-The Dashboard uses the existing local `sensors.local.json` by default and opens `http://127.0.0.1:8765/`. Its advanced controls use the same public `LinptechClient`. Live mode receives real hardware data; replay/demo data is only an interface test. Keep credentials out of version control. See [Windows Dashboard](docs/DASHBOARD_WINDOWS.md) for setup.
+The Dashboard uses `sensors.local.json` by default and opens `http://127.0.0.1:8765/`. Add devices manually or install `.[cloud]` to choose a region, scan a Xiaomi Home login QR and save credentials for selected supported sensors. Other devices' saved credentials are preserved. Login is optional; monitoring uses local credentials. Advanced controls use the public `LinptechClient`. Replay/demo data is only an interface test. See [Windows Dashboard](docs/DASHBOARD_WINDOWS.md) and [credential setup](docs/BINDKEY_WINDOWS.md).
 
 Home Assistant can use the optional **MQTT Discovery bridge**; this is not a native `custom_components` integration. A proxy dedicated to this bridge must have a single BLE subscription owner: do not simultaneously assign it to HA's native ESPHome Bluetooth integration. See [ESPHome and Home Assistant](docs/ESPHOME_HOME_ASSISTANT.md).
 
